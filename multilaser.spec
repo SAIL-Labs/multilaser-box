@@ -59,14 +59,14 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # icon='figures/icon.ico',  # Uncomment and provide icon file
+    icon='figures/icon.ico',  # Windows icon
 )
 
 # For macOS app bundle
 app = BUNDLE(
     exe,
     name='MultiLaserController.app',
-    icon=None,  # Set to 'figures/icon.icns' if available
+    icon='figures/icon.icns',  # macOS icon
     bundle_identifier='com.multilaser.controller',
     info_plist={
         'NSPrincipalClass': 'NSApplication',

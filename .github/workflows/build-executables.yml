@@ -31,13 +31,12 @@ jobs:
 
       - name: Build Windows executable
         run: |
-          pyinstaller --onefile --windowed --name=MultiLaserController --icon=figures/icon.ico laser_controller_gui.py
-        continue-on-error: true  # Continue even if icon is missing
-
-      - name: Build Windows executable (without icon)
-        if: failure()
-        run: |
-          pyinstaller --onefile --windowed --name=MultiLaserController laser_controller_gui.py
+          if (Test-Path "figures/icon.ico") {
+            pyinstaller --onefile --windowed --name=MultiLaserController --icon=figures/icon.ico laser_controller_gui.py
+          } else {
+            pyinstaller --onefile --windowed --name=MultiLaserController laser_controller_gui.py
+          }
+        shell: pwsh
 
       - name: Package Windows artifacts
         run: |
@@ -72,18 +71,20 @@ jobs:
 
       - name: Build macOS executable
         run: |
-          pyinstaller --onefile --windowed --name=MultiLaserController --icon=figures/icon.icns laser_controller_gui.py
-        continue-on-error: true  # Continue even if icon is missing
-
-      - name: Build macOS executable (without icon)
-        if: failure()
-        run: |
-          pyinstaller --onefile --windowed --name=MultiLaserController laser_controller_gui.py
+          if [ -f "figures/icon.icns" ]; then
+            pyinstaller --windowed --name=MultiLaserController --icon=figures/icon.icns laser_controller_gui.py
+          else
+            pyinstaller --windowed --name=MultiLaserController laser_controller_gui.py
+          fi
 
       - name: Package macOS artifacts
         run: |
           mkdir -p release/macos
-          cp -r dist/MultiLaserController.app release/macos/ 2>/dev/null || cp dist/MultiLaserController release/macos/
+          if [ -d "dist/MultiLaserController.app" ]; then
+            cp -r dist/MultiLaserController.app release/macos/
+          else
+            cp dist/MultiLaserController release/macos/
+          fi
           cp README.md release/macos/
           cp multilaser_manual.md release/macos/
           cp -r laser_ttl_controller release/macos/

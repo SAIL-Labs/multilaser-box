@@ -87,14 +87,16 @@ pyinstaller --onefile --windowed --name=MultiLaserController laser_controller_gu
 pip install -r requirements.txt
 pip install pyinstaller
 
-# Build using spec file (recommended)
+# Build using spec file (recommended - creates .app bundle)
 pyinstaller multilaser.spec
 
-# Or build with command line
-pyinstaller --onefile --windowed --name=MultiLaserController laser_controller_gui.py
+# Or build with command line (creates .app bundle)
+pyinstaller --windowed --name=MultiLaserController --icon=figures/icon.icns laser_controller_gui.py
 
-# Application will be in dist/MultiLaserController.app
+# Application bundle will be in dist/MultiLaserController.app
 ```
+
+**Note**: On macOS, do NOT use `--onefile` with `--windowed` as it prevents the `.app` bundle from being created. The spec file and GitHub Actions workflow use `--windowed` only to create a proper `.app` bundle.
 
 ### Linux Build (Not in CI)
 
@@ -129,26 +131,28 @@ pyinstaller multilaser.spec
 
 ### Adding Application Icons
 
+The GitHub Actions workflow automatically detects and uses icon files if they exist.
+
 To add custom icons:
 
 1. Create icon files:
    - Windows: `figures/icon.ico` (256x256 or multiple sizes)
    - macOS: `figures/icon.icns` (multiple resolutions)
 
-2. Update the spec file:
-   ```python
-   exe = EXE(
-       ...
-       icon='figures/icon.ico',  # Uncomment this line
-   )
-
-   app = BUNDLE(
-       ...
-       icon='figures/icon.icns',  # Set the icon path
-   )
+2. Add them to the repository:
+   ```bash
+   git add figures/icon.ico figures/icon.icns
+   git commit -m "Add application icons"
+   git push
    ```
 
-3. Update the GitHub Actions workflow to remove `continue-on-error: true`
+3. The workflow will automatically use them on the next build!
+
+The workflow checks for icon files and only uses them if present:
+- **Windows**: Checks for `figures/icon.ico`
+- **macOS**: Checks for `figures/icon.icns`
+
+If icons are not found, the build proceeds without them (no error).
 
 ## Version Numbering
 
