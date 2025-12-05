@@ -1,0 +1,160 @@
+name: Build Standalone Executables
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags like v1.0.0
+  workflow_dispatch:  # Allow manual trigger
+    inputs:
+      version:
+        description: 'Version number (e.g., 1.0.0)'
+        required: false
+        default: 'dev'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build Windows executable
+        run: |
+          pyinstaller --onefile --windowed --name=MultiLaserController --icon=figures/icon.ico laser_controller_gui.py
+        continue-on-error: true  # Continue even if icon is missing
+
+      - name: Build Windows executable (without icon)
+        if: failure()
+        run: |
+          pyinstaller --onefile --windowed --name=MultiLaserController laser_controller_gui.py
+
+      - name: Package Windows artifacts
+        run: |
+          mkdir -p release/windows
+          copy dist\MultiLaserController.exe release\windows\
+          copy README.md release\windows\
+          copy multilaser_manual.md release\windows\
+          xcopy /E /I laser_ttl_controller release\windows\laser_ttl_controller
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MultiLaserController-Windows
+          path: release/windows/
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build macOS executable
+        run: |
+          pyinstaller --onefile --windowed --name=MultiLaserController --icon=figures/icon.icns laser_controller_gui.py
+        continue-on-error: true  # Continue even if icon is missing
+
+      - name: Build macOS executable (without icon)
+        if: failure()
+        run: |
+          pyinstaller --onefile --windowed --name=MultiLaserController laser_controller_gui.py
+
+      - name: Package macOS artifacts
+        run: |
+          mkdir -p release/macos
+          cp -r dist/MultiLaserController.app release/macos/ 2>/dev/null || cp dist/MultiLaserController release/macos/
+          cp README.md release/macos/
+          cp multilaser_manual.md release/macos/
+          cp -r laser_ttl_controller release/macos/
+
+      - name: Create DMG (optional)
+        run: |
+          # Create a simple disk image for easier distribution
+          if [ -d "dist/MultiLaserController.app" ]; then
+            hdiutil create -volname "MultiLaserController" -srcfolder dist/MultiLaserController.app -ov -format UDZO release/MultiLaserController-macOS.dmg
+          fi
+        continue-on-error: true
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MultiLaserController-macOS
+          path: release/macos/
+
+  create-release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: MultiLaserController-Windows
+          path: windows-release/
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: MultiLaserController-macOS
+          path: macos-release/
+
+      - name: Create release archives
+        run: |
+          cd windows-release && zip -r ../MultiLaserController-Windows.zip . && cd ..
+          cd macos-release && tar -czf ../MultiLaserController-macOS.tar.gz . && cd ..
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            MultiLaserController-Windows.zip
+            MultiLaserController-macOS.tar.gz
+          body: |
+            ## Multi-Laser Controller Release
+
+            Standalone executables for Windows and macOS.
+
+            ### Windows Installation
+            1. Download `MultiLaserController-Windows.zip`
+            2. Extract the archive
+            3. Run `MultiLaserController.exe`
+
+            ### macOS Installation
+            1. Download `MultiLaserController-macOS.tar.gz`
+            2. Extract the archive
+            3. Run `MultiLaserController.app` or `MultiLaserController`
+            4. If blocked by Gatekeeper, go to System Preferences > Security & Privacy and allow the app
+
+            ### Arduino Firmware
+            The `laser_ttl_controller` folder contains the Arduino firmware files.
+            Upload the appropriate `.ino` file to your Arduino board.
+
+            See `README.md` and `multilaser_manual.md` for detailed usage instructions.
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
