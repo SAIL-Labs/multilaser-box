@@ -3,30 +3,131 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.egg
+*.egg-info/
 .Python
 env/
 venv/
 ENV/
 .venv
-build
-dist
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.pytest_cache/
+
+# Virtual Environments
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.conda/
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+*.manifest
+*.spec.orig
+
+# Keep our custom spec file but ignore PyInstaller auto-generated ones
+!multilaser.spec
+LaserController.spec
+
+# Package building
+*.egg-info/
+.eggs/
+*.whl
+*.tar.gz
+*.zip
 
 # IDEs
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
 
 # OS
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
+Desktop.ini
 
 # Documents (if you don't want them in Git)
 *.pdf
 *.xlsx
 # *.svg
-*.spec
 
 # CAD files (if you don't want them in Git)
 cads/
 
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~.nib
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Configuration files with secrets (if any)
+.env
+.env.local
+secrets.json
+config.local.yml
+
+# Testing
+.pytest_cache/
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+
+# Documentation builds
+docs/_build/
+site/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# macOS
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
 # # Arduino files (if you don't want them in Git)
 # *.ino
+
+# Conda
+*.conda
+.conda_env/

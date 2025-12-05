@@ -29,19 +29,68 @@ pip install pyserial PyQt6
 
 ## Installation
 
+### Option 1: Standalone Executables (No Python Required)
+
+**For end users who just want to run the application:**
+
+Download pre-built executables from the [Releases page](https://github.com/yourusername/multilaser-box/releases):
+
+- **Windows**: Download `MultiLaserController-Windows.zip`, extract, and run `MultiLaserController.exe`
+- **macOS**: Download `MultiLaserController-macOS.tar.gz`, extract, and run `MultiLaserController.app`
+
+These executables include everything needed - no Python installation required!
+
+### Option 2: Install as Package (For Developers)
+
+Using conda (recommended):
+
+```bash
+# Create and activate the conda environment
+conda env create -f environment.yml
+conda activate multilaser
+```
+
+The package will be installed in editable mode with the `multilaser` and `multilaser-gui` commands available.
+
+Using pip:
+
+```bash
+# Install the package
+pip install -e .
+```
+
+After installation, you can run the GUI from anywhere using:
+
+```bash
+multilaser
+# or
+multilaser-gui
+```
+
+### Option 3: Manual Installation
+
 1. Clone or download this repository
 2. Install required Python packages:
    ```bash
    pip install -r requirements.txt
    ```
-3. Ensure both `multi_laser_controller.py` and `laser_control_gui.py` are in the same directory
-4. Upload the appropriate firmware to your Arduino
+3. Upload the appropriate firmware to your Arduino
+4. Run the GUI directly:
+   ```bash
+   python laser_controller_gui.py
+   ```
 
 ## Usage
 
 ### Starting the GUI
 
-Run the GUI application:
+If installed as a package:
+
+```bash
+multilaser
+```
+
+Or run directly:
 
 ```bash
 python laser_controller_gui.py

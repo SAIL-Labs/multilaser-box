@@ -1,0 +1,6 @@
+include README.md
+include LICENSE
+include requirements.txt
+include multilaser_manual.md
+recursive-include laser_ttl_controller *.ino
+recursive-include figures *
