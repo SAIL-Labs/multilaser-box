@@ -31,11 +31,7 @@ jobs:
 
       - name: Build Windows executable
         run: |
-          if (Test-Path "figures/icon.ico") {
-            pyinstaller --onefile --windowed --name=MultiLaserController --icon=figures/icon.ico laser_controller_gui.py
-          } else {
-            pyinstaller --onefile --windowed --name=MultiLaserController laser_controller_gui.py
-          }
+          pyinstaller --onefile --windowed --name=MultiLaserController laser_controller_gui.py
         shell: pwsh
 
       - name: Package Windows artifacts
@@ -71,11 +67,7 @@ jobs:
 
       - name: Build macOS executable
         run: |
-          if [ -f "figures/icon.icns" ]; then
-            pyinstaller --windowed --name=MultiLaserController --icon=figures/icon.icns laser_controller_gui.py
-          else
-            pyinstaller --windowed --name=MultiLaserController laser_controller_gui.py
-          fi
+          pyinstaller --windowed --name=MultiLaserController laser_controller_gui.py
 
       - name: Package macOS artifacts
         run: |
