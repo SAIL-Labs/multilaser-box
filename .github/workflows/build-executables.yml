@@ -66,7 +66,7 @@ jobs:
 
       - name: Build macOS executable
         run: |
-          pyinstaller --onedir --windowed --name=MultiLaserController --icon=figures/icon.icns --add-data="figures/icon.icns:figures" --hidden-import=pyvisa --hidden-import=pyvisa_py multilaser/laser_controller_gui.py
+          pyinstaller MultiLaserController.spec
 
       - name: Ad-hoc code sign the app
         run: |
