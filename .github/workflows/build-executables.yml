@@ -14,25 +14,24 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Miniconda
+        uses: conda-incubator/setup-miniconda@v3
         with:
+          auto-update-conda: true
+          activate-environment: multilaser
+          environment-file: environment.yml
           python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
 
       - name: Build Windows executable
         run: |
           pyinstaller --onefile --windowed --name=MultiLaserController --icon=figures/icon.ico --add-data="figures/icon.ico;figures" --hidden-import=pyvisa --hidden-import=pyvisa_py multilaser/laser_controller_gui.py
-        shell: pwsh
 
       - name: Package Windows artifacts
         run: |
@@ -50,20 +49,20 @@ jobs:
 
   build-macos:
     runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash -el {0}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Miniconda
+        uses: conda-incubator/setup-miniconda@v3
         with:
+          auto-update-conda: true
+          activate-environment: multilaser
+          environment-file: environment.yml
           python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
 
       - name: Build macOS executable
         run: |
