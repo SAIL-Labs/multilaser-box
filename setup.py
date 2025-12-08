@@ -11,15 +11,15 @@ long_description = (this_directory / "README.md").read_text()
 
 setup(
     name="multilaser-controller",
-    version="1.0.0",
+    version="1.1.0",
     author="Kok-Wei Bong, Chris Betters",
     author_email="",
-    description="A Python-based graphical interface for controlling multiple lasers through Arduino",
+    description="A Python-based graphical interface for controlling multiple lasers and Thorlabs power meters",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/yourusername/multilaser-box",
     packages=find_packages(),
-    py_modules=["laser_controller", "laser_controller_gui"],
+    py_modules=["laser_controller", "laser_controller_gui", "power_meter_controller", "power_meter_tab"],
     classifiers=[
         "Development Status :: 4 - Beta",
         "Intended Audience :: Science/Research",
@@ -41,6 +41,10 @@ setup(
     extras_require={
         "dev": [
             "pyinstaller",
+        ],
+        "powermeter": [
+            "pyvisa>=1.11.0",
+            "pyvisa-py>=0.5.0",
         ],
     },
     entry_points={
