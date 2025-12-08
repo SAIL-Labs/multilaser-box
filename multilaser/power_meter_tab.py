@@ -26,7 +26,7 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 from typing import Optional
 
-from power_meter_controller import (
+from multilaser.power_meter_controller import (
     PowerMeterController,
     PowerMeterError,
     PowerMeterRole,

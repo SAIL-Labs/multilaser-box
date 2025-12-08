@@ -18,8 +18,7 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/yourusername/multilaser-box",
-    packages=find_packages(),
-    py_modules=["laser_controller", "laser_controller_gui", "power_meter_controller", "power_meter_tab"],
+    packages=find_packages(exclude=["tests", "dist", "build"]),
     classifiers=[
         "Development Status :: 4 - Beta",
         "Intended Audience :: Science/Research",
@@ -49,12 +48,12 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "multilaser-gui=laser_controller_gui:main",
-            "multilaser=laser_controller_gui:main",
+            "multilaser-gui=multilaser.laser_controller_gui:main",
+            "multilaser=multilaser.laser_controller_gui:main",
         ],
     },
     include_package_data=True,
     package_data={
-        "": ["laser_ttl_controller/*.ino", "figures/*"],
+        "multilaser": ["../laser_ttl_controller/*.ino", "../figures/*"],
     },
 )

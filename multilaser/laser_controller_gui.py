@@ -30,12 +30,11 @@ import serial.tools.list_ports
 from typing import List
 
 # Import the MultiLaserController class
-# Assuming it's in the same directory or properly installed
-from laser_controller import MultiLaserController, LaserControllerError, LaserState
+from multilaser.laser_controller import MultiLaserController, LaserControllerError, LaserState
 
 # Import the PowerMeterTab
 try:
-    from power_meter_tab import PowerMeterTab
+    from multilaser.power_meter_tab import PowerMeterTab
     POWER_METER_AVAILABLE = True
 except ImportError:
     POWER_METER_AVAILABLE = False
