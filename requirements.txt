@@ -1,4 +1,0 @@
-numpy
-pyserial
-pyqt6
-pyinstaller
