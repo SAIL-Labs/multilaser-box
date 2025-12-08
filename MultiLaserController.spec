@@ -3,10 +3,10 @@
 
 a = Analysis(
     ['multilaser/laser_controller_gui.py'],
-    pathex=['.'],
+    pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=['multilaser.laser_controller', 'multilaser.power_meter_controller', 'multilaser.power_meter_tab'],
+    datas=[('figures/icon.icns', 'figures')],
+    hiddenimports=['pyvisa', 'pyvisa_py'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

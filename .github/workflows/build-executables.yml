@@ -31,7 +31,7 @@ jobs:
 
       - name: Build Windows executable
         run: |
-          pyinstaller --onefile --windowed --name=MultiLaserController --paths=. -m multilaser.laser_controller_gui
+          pyinstaller --onefile --windowed --name=MultiLaserController --icon=figures/icon.ico --add-data="figures/icon.ico;figures" --hidden-import=pyvisa --hidden-import=pyvisa_py multilaser/laser_controller_gui.py
         shell: pwsh
 
       - name: Package Windows artifacts
@@ -67,7 +67,7 @@ jobs:
 
       - name: Build macOS executable
         run: |
-          pyinstaller --windowed --name=MultiLaserController --paths=. -m multilaser.laser_controller_gui
+          pyinstaller --onedir --windowed --name=MultiLaserController --icon=figures/icon.icns --add-data="figures/icon.icns:figures" --hidden-import=pyvisa --hidden-import=pyvisa_py multilaser/laser_controller_gui.py
 
       - name: Package macOS artifacts
         run: |
