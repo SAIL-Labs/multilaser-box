@@ -105,6 +105,9 @@ class LaserControlGUI(QMainWindow):
         # Power meter tab reference
         self.power_meter_tab = None
 
+        # Emergency stop state
+        self.emergency_stop_active = False
+
         self.init_ui()
         self.populate_com_ports()
 
@@ -265,28 +268,6 @@ class LaserControlGUI(QMainWindow):
         # === Additional Controls Row ===
         extra_controls_layout = QHBoxLayout()
 
-        # All On button
-        self.all_on_btn = QPushButton("All ON")
-        self.all_on_btn.setMinimumSize(120, 40)
-        self.all_on_btn.setEnabled(False)
-        self.all_on_btn.clicked.connect(self.turn_all_on)
-        self.all_on_btn.setStyleSheet(
-            """
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            QPushButton:disabled {
-                background-color: #cccccc;
-            }
-        """
-        )
-        extra_controls_layout.addWidget(self.all_on_btn)
-
         # All Off button
         self.all_off_btn = QPushButton("All OFF")
         self.all_off_btn.setMinimumSize(120, 40)
@@ -311,11 +292,11 @@ class LaserControlGUI(QMainWindow):
 
         extra_controls_layout.addStretch()
 
-        # Emergency stop button
+        # Emergency stop button (toggle)
         self.emergency_btn = QPushButton("⚠ EMERGENCY STOP")
         self.emergency_btn.setMinimumSize(160, 40)
         self.emergency_btn.setEnabled(False)
-        self.emergency_btn.clicked.connect(self.emergency_stop)
+        self.emergency_btn.clicked.connect(self.toggle_emergency_stop)
         self.emergency_btn.setStyleSheet(
             """
             QPushButton {
@@ -405,7 +386,6 @@ class LaserControlGUI(QMainWindow):
             # Enable controls
             for btn in self.toggle_buttons:
                 btn.setEnabled(True)
-            self.all_on_btn.setEnabled(True)
             self.all_off_btn.setEnabled(True)
             self.emergency_btn.setEnabled(True)
 
@@ -457,9 +437,11 @@ class LaserControlGUI(QMainWindow):
         # Disable controls
         for btn in self.toggle_buttons:
             btn.setEnabled(False)
-        self.all_on_btn.setEnabled(False)
         self.all_off_btn.setEnabled(False)
         self.emergency_btn.setEnabled(False)
+
+        # Reset emergency stop state
+        self.emergency_stop_active = False
 
         # Enable connection settings
         self.port_combo.setEnabled(True)
@@ -475,6 +457,10 @@ class LaserControlGUI(QMainWindow):
     def toggle_laser(self, laser_number: int):
         """Turn on a specific laser and turn off all others"""
         if not self.controller or not self.controller.connected:
+            return
+
+        # Don't allow laser control if emergency stop is active
+        if self.emergency_stop_active:
             return
 
         try:
@@ -494,23 +480,13 @@ class LaserControlGUI(QMainWindow):
                 self, "Control Error", f"Failed to control laser:\n{str(e)}"
             )
 
-    def turn_all_on(self):
-        """Turn all lasers on"""
-        if not self.controller or not self.controller.connected:
-            return
-
-        try:
-            self.controller.turn_on_all()
-            self.update_led_states()
-            self.statusBar().showMessage("All lasers turned ON")
-        except Exception as e:
-            QMessageBox.critical(
-                self, "Control Error", f"Failed to turn on all lasers:\n{str(e)}"
-            )
-
     def turn_all_off(self):
         """Turn all lasers off"""
         if not self.controller or not self.controller.connected:
+            return
+
+        # Don't allow if emergency stop is active
+        if self.emergency_stop_active:
             return
 
         try:
@@ -522,31 +498,76 @@ class LaserControlGUI(QMainWindow):
                 self, "Control Error", f"Failed to turn off all lasers:\n{str(e)}"
             )
 
-    def emergency_stop(self):
-        """Emergency stop - turn off all lasers immediately"""
+    def toggle_emergency_stop(self):
+        """Toggle emergency stop - turn off all lasers and disable/enable controls"""
         if not self.controller or not self.controller.connected:
             return
 
-        reply = QMessageBox.question(
-            self,
-            "Emergency Stop",
-            "Turn off all lasers immediately?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-
-        if reply == QMessageBox.StandardButton.Yes:
+        if not self.emergency_stop_active:
+            # Activate emergency stop
             try:
                 self.controller.emergency_stop()
                 self.update_led_states()
-                self.statusBar().showMessage(
-                    "EMERGENCY STOP ACTIVATED - All lasers OFF"
+                self.emergency_stop_active = True
+
+                # Disable all laser controls
+                for btn in self.toggle_buttons:
+                    btn.setEnabled(False)
+                self.all_off_btn.setEnabled(False)
+
+                # Update emergency button appearance
+                self.emergency_btn.setText("⚠ EMERGENCY STOP ACTIVE")
+                self.emergency_btn.setStyleSheet(
+                    """
+                    QPushButton {
+                        background-color: #8B0000;
+                        color: white;
+                        font-weight: bold;
+                        border-radius: 4px;
+                        border: 3px solid #ff0000;
+                    }
+                    QPushButton:hover {
+                        background-color: #660000;
+                    }
+                    """
                 )
+
+                self.statusBar().showMessage("EMERGENCY STOP ACTIVATED - All lasers OFF and locked")
             except Exception as e:
                 QMessageBox.critical(
                     self,
                     "Emergency Stop Error",
                     f"Failed to execute emergency stop:\n{str(e)}",
                 )
+        else:
+            # Deactivate emergency stop
+            self.emergency_stop_active = False
+
+            # Re-enable all laser controls
+            for btn in self.toggle_buttons:
+                btn.setEnabled(True)
+            self.all_off_btn.setEnabled(True)
+
+            # Restore normal emergency button appearance
+            self.emergency_btn.setText("⚠ EMERGENCY STOP")
+            self.emergency_btn.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: #ff0000;
+                    color: white;
+                    font-weight: bold;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #cc0000;
+                }
+                QPushButton:disabled {
+                    background-color: #cccccc;
+                }
+                """
+            )
+
+            self.statusBar().showMessage("Emergency stop deactivated - Controls enabled")
 
     def update_led_states(self):
         """Update all LED indicators based on controller state"""
