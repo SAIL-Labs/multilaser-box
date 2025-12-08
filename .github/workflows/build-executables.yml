@@ -47,62 +47,8 @@ jobs:
           name: MultiLaserController-Windows
           path: release/windows/
 
-  build-macos:
-    runs-on: macos-14  # macOS 14 (Sonoma) on Apple Silicon M1
-    defaults:
-      run:
-        shell: bash -el {0}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Miniconda
-        uses: conda-incubator/setup-miniconda@v3
-        with:
-          auto-update-conda: true
-          activate-environment: multilaser
-          environment-file: environment.yml
-          python-version: '3.11'
-
-      - name: Build macOS executable
-        run: |
-          pyinstaller MultiLaserController.spec
-
-      - name: Ad-hoc code sign the app
-        run: |
-          # Ad-hoc signing to allow the app to run on macOS
-          codesign --force --deep --sign - dist/MultiLaserController.app
-          # Verify the signature
-          codesign --verify --verbose dist/MultiLaserController.app
-
-      - name: Package macOS artifacts
-        run: |
-          mkdir -p release/macos
-          if [ -d "dist/MultiLaserController.app" ]; then
-            cp -r dist/MultiLaserController.app release/macos/
-          else
-            cp dist/MultiLaserController release/macos/
-          fi
-          cp README.md release/macos/
-          cp multilaser_manual.md release/macos/
-          cp -r laser_ttl_controller release/macos/
-
-      - name: Create DMG (optional)
-        run: |
-          # Create a simple disk image for easier distribution
-          if [ -d "dist/MultiLaserController.app" ]; then
-            hdiutil create -volname "MultiLaserController" -srcfolder dist/MultiLaserController.app -ov -format UDZO release/MultiLaserController-macOS.dmg
-          fi
-        continue-on-error: true
-
-      - name: Upload macOS artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: MultiLaserController-macOS
-          path: release/macos/
-
   create-release:
-    needs: [build-windows, build-macos]
+    needs: [build-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
@@ -115,42 +61,24 @@ jobs:
           name: MultiLaserController-Windows
           path: windows-release/
 
-      - name: Download macOS artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: MultiLaserController-macOS
-          path: macos-release/
-
       - name: Create release archives
         run: |
           cd windows-release && zip -r ../MultiLaserController-Windows.zip . && cd ..
-          cd macos-release && tar -czf ../MultiLaserController-macOS.tar.gz . && cd ..
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
             MultiLaserController-Windows.zip
-            MultiLaserController-macOS.tar.gz
           body: |
             ## Multi-Laser Controller Release
 
-            Standalone executables for Windows and macOS.
+            Standalone executable for Windows.
 
             ### Windows Installation
             1. Download `MultiLaserController-Windows.zip`
             2. Extract the archive
             3. Run `MultiLaserController.exe`
-
-            ### macOS Installation (Apple Silicon)
-            1. Download `MultiLaserController-macOS.tar.gz`
-            2. Extract the archive
-            3. Right-click `MultiLaserController.app` and select "Open" (first time only)
-            4. If still blocked by Gatekeeper, run in Terminal:
-               ```
-               xattr -cr MultiLaserController.app
-               ```
-            5. Then right-click and "Open" again
 
             ### Arduino Firmware
             The `laser_ttl_controller` folder contains the Arduino firmware files.
