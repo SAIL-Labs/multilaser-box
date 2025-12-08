@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QLabel,
     QMessageBox,
+    QTabWidget,
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
@@ -31,6 +32,14 @@ from typing import List
 # Import the MultiLaserController class
 # Assuming it's in the same directory or properly installed
 from laser_controller import MultiLaserController, LaserControllerError, LaserState
+
+# Import the PowerMeterTab
+try:
+    from power_meter_tab import PowerMeterTab
+    POWER_METER_AVAILABLE = True
+except ImportError:
+    POWER_METER_AVAILABLE = False
+    print("Warning: Power meter tab not available. Install pyvisa and pyvisa-py to enable.")
 
 
 class LEDIndicator(QLabel):
@@ -94,20 +103,46 @@ class LaserControlGUI(QMainWindow):
         self.led_indicators = []
         self.toggle_buttons = []
 
+        # Power meter tab reference
+        self.power_meter_tab = None
+
         self.init_ui()
         self.populate_com_ports()
 
     def init_ui(self):
         """Initialise the user interface"""
         self.setWindowTitle("Multi-Laser Controller")
-        self.setGeometry(100, 100, 600, 300)
+        self.setGeometry(100, 100, 800, 600)
 
         # Create central widget and main layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setSpacing(20)
-        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Create tab widget
+        self.tab_widget = QTabWidget()
+        main_layout.addWidget(self.tab_widget)
+
+        # Create laser control tab
+        laser_tab = self.create_laser_control_tab()
+        self.tab_widget.addTab(laser_tab, "Laser Control")
+
+        # Create power meter tab if available
+        if POWER_METER_AVAILABLE:
+            self.power_meter_tab = PowerMeterTab()
+            self.tab_widget.addTab(self.power_meter_tab, "Power Meters")
+
+        # Status bar
+        self.statusBar().showMessage("Disconnected")
+
+    def create_laser_control_tab(self):
+        """Create the laser control tab widget"""
+        tab_widget = QWidget()
+        tab_layout = QVBoxLayout(tab_widget)
+        tab_layout.setSpacing(20)
+        tab_layout.setContentsMargins(20, 20, 20, 20)
 
         # === ROW 1: Connection Controls ===
         connection_layout = QHBoxLayout()
@@ -166,7 +201,7 @@ class LaserControlGUI(QMainWindow):
         connection_layout.addWidget(self.connect_btn)
 
         connection_layout.addStretch()
-        main_layout.addLayout(connection_layout)
+        tab_layout.addLayout(connection_layout)
 
         # === ROW 2: LED Indicators ===
         led_layout = QHBoxLayout()
@@ -190,7 +225,7 @@ class LaserControlGUI(QMainWindow):
 
             led_layout.addLayout(led_container)
 
-        main_layout.addLayout(led_layout)
+        tab_layout.addLayout(led_layout)
 
         # === ROW 3: Control Buttons ===
         button_layout = QHBoxLayout()
@@ -226,7 +261,7 @@ class LaserControlGUI(QMainWindow):
             self.toggle_buttons.append(btn)
             button_layout.addWidget(btn)
 
-        main_layout.addLayout(button_layout)
+        tab_layout.addLayout(button_layout)
 
         # === Additional Controls Row ===
         extra_controls_layout = QHBoxLayout()
@@ -300,10 +335,11 @@ class LaserControlGUI(QMainWindow):
         )
         extra_controls_layout.addWidget(self.emergency_btn)
 
-        main_layout.addLayout(extra_controls_layout)
+        tab_layout.addLayout(extra_controls_layout)
 
-        # Status bar
-        self.statusBar().showMessage("Disconnected")
+        tab_layout.addStretch()
+
+        return tab_widget
 
     def populate_com_ports(self):
         """Scan and populate available COM ports"""
@@ -524,6 +560,8 @@ class LaserControlGUI(QMainWindow):
 
     def closeEvent(self, event):
         """Handle window close event"""
+        should_close = True
+
         if self.controller and self.controller.connected:
             reply = QMessageBox.question(
                 self,
@@ -534,11 +572,17 @@ class LaserControlGUI(QMainWindow):
 
             if reply == QMessageBox.StandardButton.Yes:
                 self.disconnect_from_controller()
-                event.accept()
             else:
-                event.ignore()
-        else:
+                should_close = False
+
+        # Clean up power meter tab if it exists
+        if should_close and self.power_meter_tab:
+            self.power_meter_tab.cleanup()
+
+        if should_close:
             event.accept()
+        else:
+            event.ignore()
 
 
 def main():
