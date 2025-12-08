@@ -7,8 +7,8 @@ This provides more control over the build process than command-line options
 block_cipher = None
 
 a = Analysis(
-    ['laser_controller_gui.py'],
-    pathex=[],
+    ['multilaser/laser_controller_gui.py'],
+    pathex=['.'],
     binaries=[],
     datas=[
         ('laser_ttl_controller/*.ino', 'laser_ttl_controller'),
@@ -22,6 +22,9 @@ a = Analysis(
         'PyQt6.QtWidgets',
         'serial',
         'numpy',
+        'multilaser.laser_controller',
+        'multilaser.power_meter_controller',
+        'multilaser.power_meter_tab',
     ],
     hookspath=[],
     hooksconfig={},
@@ -71,7 +74,7 @@ app = BUNDLE(
     info_plist={
         'NSPrincipalClass': 'NSApplication',
         'NSHighResolutionCapable': 'True',
-        'CFBundleShortVersionString': '1.0.0',
-        'CFBundleVersion': '1.0.0',
+        'CFBundleShortVersionString': '1.1.0',
+        'CFBundleVersion': '1.1.0',
     },
 )

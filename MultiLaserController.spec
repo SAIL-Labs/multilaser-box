@@ -2,11 +2,11 @@
 
 
 a = Analysis(
-    ['laser_controller_gui.py'],
-    pathex=[],
+    ['multilaser/laser_controller_gui.py'],
+    pathex=['.'],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    hiddenimports=['multilaser.laser_controller', 'multilaser.power_meter_controller', 'multilaser.power_meter_tab'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

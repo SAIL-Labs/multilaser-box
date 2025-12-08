@@ -77,7 +77,7 @@ multilaser-gui
 3. Upload the appropriate firmware to your Arduino
 4. Run the GUI directly:
    ```bash
-   python laser_controller_gui.py
+   python -m multilaser.laser_controller_gui
    ```
 
 ## Usage
@@ -90,10 +90,10 @@ If installed as a package:
 multilaser
 ```
 
-Or run directly:
+Or run directly from the repository:
 
 ```bash
-python laser_controller_gui.py
+python -m multilaser.laser_controller_gui
 ```
 
 ### Connecting to Hardware
