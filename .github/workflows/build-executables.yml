@@ -48,7 +48,7 @@ jobs:
           path: release/windows/
 
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-14  # macOS 14 (Sonoma) on Apple Silicon M1
     defaults:
       run:
         shell: bash -el {0}
@@ -67,6 +67,13 @@ jobs:
       - name: Build macOS executable
         run: |
           pyinstaller --onedir --windowed --name=MultiLaserController --icon=figures/icon.icns --add-data="figures/icon.icns:figures" --hidden-import=pyvisa --hidden-import=pyvisa_py multilaser/laser_controller_gui.py
+
+      - name: Ad-hoc code sign the app
+        run: |
+          # Ad-hoc signing to allow the app to run on macOS
+          codesign --force --deep --sign - dist/MultiLaserController.app
+          # Verify the signature
+          codesign --verify --verbose dist/MultiLaserController.app
 
       - name: Package macOS artifacts
         run: |
@@ -135,11 +142,15 @@ jobs:
             2. Extract the archive
             3. Run `MultiLaserController.exe`
 
-            ### macOS Installation
+            ### macOS Installation (Apple Silicon)
             1. Download `MultiLaserController-macOS.tar.gz`
             2. Extract the archive
-            3. Run `MultiLaserController.app` or `MultiLaserController`
-            4. If blocked by Gatekeeper, go to System Preferences > Security & Privacy and allow the app
+            3. Right-click `MultiLaserController.app` and select "Open" (first time only)
+            4. If still blocked by Gatekeeper, run in Terminal:
+               ```
+               xattr -cr MultiLaserController.app
+               ```
+            5. Then right-click and "Open" again
 
             ### Arduino Firmware
             The `laser_ttl_controller` folder contains the Arduino firmware files.
