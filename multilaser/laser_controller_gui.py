@@ -362,6 +362,7 @@ class LaserControlGUI(QMainWindow):
                 baud_rate=baud_rate,
                 num_lasers=self.num_lasers,
                 auto_connect=False,
+                use_scpi=True,  # Enable SCPI mode by default
             )
 
             self.controller.connect()

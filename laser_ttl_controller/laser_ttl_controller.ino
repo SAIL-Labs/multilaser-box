@@ -70,8 +70,7 @@ void setup() {
   Serial.println();
   Serial.println();
   Serial.println("Available Commands:");
-  Serial.println("  '1', '2', '3'     - Toggle individual lasers");
-  Serial.println("  'all_on'          - Turn all lasers ON");
+  Serial.println("  '1', '2', '3'     - Toggle individual lasers (only one at a time)");
   Serial.println("  'all_off'         - Turn all lasers OFF");
   Serial.println("  'status'          - Show current laser states");
   Serial.println("  'config'          - Display configuration");
@@ -98,17 +97,13 @@ void loop() {
 void processCommand(String cmd) {
   // Handle simple single-character commands
   if (cmd == "1" && NUM_LASERS >= 1) {
-    toggleLaser(1);
+    toggleLaserExclusive(1);
   }
   else if (cmd == "2" && NUM_LASERS >= 2) {
-    toggleLaser(2);
+    toggleLaserExclusive(2);
   }
   else if (cmd == "3" && NUM_LASERS >= 3) {
-    toggleLaser(3);
-  }
-  else if (cmd == "all_on") {
-    setAllLasers(true);
-    Serial.println("All active lasers turned ON");
+    toggleLaserExclusive(3);
   }
   else if (cmd == "all_off") {
     setAllLasers(false);
@@ -132,22 +127,28 @@ void processCommand(String cmd) {
   }
 }
 
-void toggleLaser(int laserNumber) {
+void toggleLaserExclusive(int laserNumber) {
   if (laserNumber < 1 || laserNumber > NUM_LASERS) {
     Serial.print("Invalid laser number. Use 1-");
     Serial.println(NUM_LASERS);
     return;
   }
-  
+
   int pin = laserPins[laserNumber - 1];
   bool currentState = digitalRead(pin);
   bool newState = !currentState;
-  
+
+  // If turning this laser ON, turn all others OFF first (exclusive operation)
+  if (newState == LASER_ON_SIGNAL) {
+    setAllLasers(false);  // Turn all off
+  }
+
+  // Now set the requested laser to the new state
   digitalWrite(pin, newState);
-  
+
   // Determine if laser is now ON or OFF based on configured logic
   bool laserIsOn = (newState == LASER_ON_SIGNAL);
-  
+
   Serial.print("Laser ");
   Serial.print(laserNumber);
   Serial.print(" (Pin ");
@@ -157,6 +158,11 @@ void toggleLaser(int laserNumber) {
   Serial.print(" (Signal: ");
   Serial.print(newState == HIGH ? "HIGH" : "LOW");
   Serial.println(")");
+}
+
+void toggleLaser(int laserNumber) {
+  // Kept for compatibility - calls exclusive version
+  toggleLaserExclusive(laserNumber);
 }
 
 void setAllLasers(bool turnOn) {

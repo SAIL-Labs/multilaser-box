@@ -338,16 +338,6 @@ class MultiLaserController:
         """Turn off a specific laser"""
         return self.set_laser(laser_number, LaserState.OFF)
 
-    def turn_on_all(self) -> bool:
-        """Turn on all lasers"""
-        if self._send_command("all_on"):
-            # Update all local states to ON
-            for i in range(1, self.num_lasers + 1):
-                self.laser_states[i] = LaserState.ON
-            self.logger.info("All lasers turned ON")
-            return True
-        return False
-
     def turn_off_all(self) -> bool:
         """Turn off all lasers"""
         if self._send_command("all_off"):

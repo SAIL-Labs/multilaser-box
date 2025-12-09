@@ -259,12 +259,6 @@ class MultiLaserControllerSCPI:
         new_state = LaserState.OFF if current_state == LaserState.ON else LaserState.ON
         self.set_laser(laser_number, new_state == LaserState.ON)
 
-    def turn_on_all(self):
-        """Turn on all lasers."""
-        self.write("ALL_ON")
-        self._laser_states = [LaserState.ON] * self.num_lasers
-        logger.info("All lasers turned ON")
-
     def turn_off_all(self):
         """Turn off all lasers."""
         self.write("ALL_OFF")

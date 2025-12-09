@@ -20,15 +20,15 @@
 // Modify these values to match your hardware setup
 
 // Device identification (returned by *IDN? query)
-const char* MANUFACTURER = "OpenSource";
-const char* MODEL = "MultiLaser-TTL";
-const char* SERIAL = "00001";
-const char* FIRMWARE = "1.0.0-SCPI";
+const char *MANUFACTURER = "SAIL-Nexus";
+const char *MODEL = "SAIL MultiLaser-TTL";
+const char *SERIAL = "00001";
+const char *FIRMWARE = "1.0.0-SCPI";
 
 // Pin assignments for each laser (change to any available digital pins)
-const int LASER1_PIN = 8;   // Change this to your desired pin for Laser 1
-const int LASER2_PIN = 9;   // Change this to your desired pin for Laser 2
-const int LASER3_PIN = 10;  // Change this to your desired pin for Laser 3
+const int LASER1_PIN = 8;  // Change this to your desired pin for Laser 1
+const int LASER2_PIN = 9;  // Change this to your desired pin for Laser 2
+const int LASER3_PIN = 10; // Change this to your desired pin for Laser 3
 
 // TTL Logic Configuration
 const int LASER_ON_SIGNAL = LOW;   // LOW (0V) turns laser ON
@@ -71,12 +71,14 @@ bool operationComplete = true;
 char cmdBuffer[CMD_BUFFER_SIZE];
 int cmdBufferIndex = 0;
 
-void setup() {
+void setup()
+{
   // Initialize serial communication
   Serial.begin(9600);
 
   // Configure laser control pins as outputs
-  for (int i = 0; i < NUM_LASERS; i++) {
+  for (int i = 0; i < NUM_LASERS; i++)
+  {
     pinMode(laserPins[i], OUTPUT);
     digitalWrite(laserPins[i], LASER_OFF_SIGNAL); // Start with all lasers OFF
   }
@@ -92,28 +94,35 @@ void setup() {
   delay(100);
 }
 
-void loop() {
+void loop()
+{
   // Check for serial data
-  while (Serial.available() > 0) {
+  while (Serial.available() > 0)
+  {
     char c = Serial.read();
 
     // Handle newline or semicolon as command terminator
-    if (c == '\n' || c == '\r' || c == ';') {
-      if (cmdBufferIndex > 0) {
+    if (c == '\n' || c == '\r' || c == ';')
+    {
+      if (cmdBufferIndex > 0)
+      {
         cmdBuffer[cmdBufferIndex] = '\0';
         processCommand(cmdBuffer);
         cmdBufferIndex = 0;
       }
     }
     // Ignore leading whitespace
-    else if (cmdBufferIndex == 0 && (c == ' ' || c == '\t')) {
+    else if (cmdBufferIndex == 0 && (c == ' ' || c == '\t'))
+    {
       continue;
     }
     // Add to buffer
-    else if (cmdBufferIndex < CMD_BUFFER_SIZE - 1) {
+    else if (cmdBufferIndex < CMD_BUFFER_SIZE - 1)
+    {
       cmdBuffer[cmdBufferIndex++] = c;
     }
-    else {
+    else
+    {
       // Buffer overflow
       cmdBufferIndex = 0;
       pushError(ERR_EXECUTION_ERROR);
@@ -123,17 +132,20 @@ void loop() {
   delay(1);
 }
 
-void processCommand(char* cmd) {
+void processCommand(char *cmd)
+{
   // Trim trailing whitespace
   int len = strlen(cmd);
-  while (len > 0 && (cmd[len-1] == ' ' || cmd[len-1] == '\t')) {
+  while (len > 0 && (cmd[len - 1] == ' ' || cmd[len - 1] == '\t'))
+  {
     cmd[--len] = '\0';
   }
 
-  if (len == 0) return;
+  if (len == 0)
+    return;
 
   // Check if it's a query (ends with '?')
-  bool isQuery = (cmd[len-1] == '?');
+  bool isQuery = (cmd[len - 1] == '?');
 
   // Convert to uppercase for case-insensitive matching
   // But preserve original for parameter parsing
@@ -142,18 +154,22 @@ void processCommand(char* cmd) {
   toUpperCase(cmdUpper);
 
   // IEEE 488.2 Common Commands (start with *)
-  if (cmdUpper[0] == '*') {
+  if (cmdUpper[0] == '*')
+  {
     processCommonCommand(cmdUpper, isQuery);
   }
   // SCPI Subsystem Commands
-  else {
+  else
+  {
     processSCPICommand(cmdUpper, cmd, isQuery);
   }
 }
 
-void processCommonCommand(char* cmd, bool isQuery) {
+void processCommonCommand(char *cmd, bool isQuery)
+{
   // *IDN? - Identification query
-  if (strcmp(cmd, "*IDN?") == 0) {
+  if (strcmp(cmd, "*IDN?") == 0)
+  {
     Serial.print(MANUFACTURER);
     Serial.print(',');
     Serial.print(MODEL);
@@ -163,172 +179,222 @@ void processCommonCommand(char* cmd, bool isQuery) {
     Serial.println(FIRMWARE);
   }
   // *RST - Reset to default state
-  else if (strcmp(cmd, "*RST") == 0) {
-    if (isQuery) {
+  else if (strcmp(cmd, "*RST") == 0)
+  {
+    if (isQuery)
+    {
       pushError(ERR_COMMAND_ONLY);
-    } else {
+    }
+    else
+    {
       resetDevice();
     }
   }
   // *CLS - Clear status
-  else if (strcmp(cmd, "*CLS") == 0) {
-    if (isQuery) {
+  else if (strcmp(cmd, "*CLS") == 0)
+  {
+    if (isQuery)
+    {
       pushError(ERR_COMMAND_ONLY);
-    } else {
+    }
+    else
+    {
       clearErrors();
     }
   }
   // *ESR? - Event Status Register query
-  else if (strcmp(cmd, "*ESR?") == 0) {
+  else if (strcmp(cmd, "*ESR?") == 0)
+  {
     Serial.println("0"); // Simple implementation: no events
   }
   // *OPC - Operation complete
-  else if (strcmp(cmd, "*OPC") == 0) {
-    if (isQuery) {
+  else if (strcmp(cmd, "*OPC") == 0)
+  {
+    if (isQuery)
+    {
       Serial.println(operationComplete ? "1" : "0");
-    } else {
+    }
+    else
+    {
       operationComplete = true;
     }
   }
   // *OPC? - Operation complete query
-  else if (strcmp(cmd, "*OPC?") == 0) {
+  else if (strcmp(cmd, "*OPC?") == 0)
+  {
     Serial.println("1"); // Always complete for this simple device
   }
   // Unknown common command
-  else {
+  else
+  {
     pushError(ERR_INVALID_COMMAND);
   }
 }
 
-void processSCPICommand(char* cmdUpper, char* cmdOriginal, bool isQuery) {
+void processSCPICommand(char *cmdUpper, char *cmdOriginal, bool isQuery)
+{
   // Parse SCPI hierarchical commands
 
   // SYSTem:ERRor? - Query error queue
-  if (strcmp(cmdUpper, "SYST:ERR?") == 0 || strcmp(cmdUpper, "SYSTEM:ERROR?") == 0) {
+  if (strcmp(cmdUpper, "SYST:ERR?") == 0 || strcmp(cmdUpper, "SYSTEM:ERROR?") == 0)
+  {
     printError();
   }
   // SYSTem:VERSion? - SCPI version
-  else if (strcmp(cmdUpper, "SYST:VERS?") == 0 || strcmp(cmdUpper, "SYSTEM:VERSION?") == 0) {
+  else if (strcmp(cmdUpper, "SYST:VERS?") == 0 || strcmp(cmdUpper, "SYSTEM:VERSION?") == 0)
+  {
     Serial.println("1999.0"); // SCPI-1999 version
   }
 
   // SOURce[1-3]:STATe - Set/query laser state
-  else if (strncmp(cmdUpper, "SOUR", 4) == 0) {
+  else if (strncmp(cmdUpper, "SOUR", 4) == 0)
+  {
     processSourceCommand(cmdUpper, cmdOriginal, isQuery);
   }
   // OUTPut[1-3][:STATe] - Alternative syntax for laser state
-  else if (strncmp(cmdUpper, "OUTP", 4) == 0) {
+  else if (strncmp(cmdUpper, "OUTP", 4) == 0)
+  {
     processOutputCommand(cmdUpper, cmdOriginal, isQuery);
   }
 
   // STATus? - Query all laser states
-  else if (strcmp(cmdUpper, "STAT?") == 0 || strcmp(cmdUpper, "STATUS?") == 0) {
+  else if (strcmp(cmdUpper, "STAT?") == 0 || strcmp(cmdUpper, "STATUS?") == 0)
+  {
     printAllStates();
   }
 
   // Legacy compatibility commands (from original firmware)
-  else if (strcmp(cmdUpper, "ALL_ON") == 0 || strcmp(cmdUpper, "ALLON") == 0) {
-    setAllLasers(true);
-  }
-  else if (strcmp(cmdUpper, "ALL_OFF") == 0 || strcmp(cmdUpper, "ALLOFF") == 0) {
+  else if (strcmp(cmdUpper, "ALL_OFF") == 0 || strcmp(cmdUpper, "ALLOFF") == 0)
+  {
     setAllLasers(false);
   }
-  else if (strcmp(cmdUpper, "1") == 0 && NUM_LASERS >= 1) {
-    toggleLaser(1);
+  else if (strcmp(cmdUpper, "1") == 0 && NUM_LASERS >= 1)
+  {
+    toggleLaserExclusive(1);
   }
-  else if (strcmp(cmdUpper, "2") == 0 && NUM_LASERS >= 2) {
-    toggleLaser(2);
+  else if (strcmp(cmdUpper, "2") == 0 && NUM_LASERS >= 2)
+  {
+    toggleLaserExclusive(2);
   }
-  else if (strcmp(cmdUpper, "3") == 0 && NUM_LASERS >= 3) {
-    toggleLaser(3);
+  else if (strcmp(cmdUpper, "3") == 0 && NUM_LASERS >= 3)
+  {
+    toggleLaserExclusive(3);
   }
 
   // Unknown command
-  else {
+  else
+  {
     pushError(ERR_INVALID_COMMAND);
   }
 }
 
-void processSourceCommand(char* cmdUpper, char* cmdOriginal, bool isQuery) {
+void processSourceCommand(char *cmdUpper, char *cmdOriginal, bool isQuery)
+{
   // Parse SOURce[1-3]:LASeR:STATe or SOURce[1-3]:STATe
   int laserNum = 0;
 
   // Extract laser number if present
-  if (strlen(cmdUpper) > 4 && cmdUpper[4] >= '1' && cmdUpper[4] <= '3') {
+  if (strlen(cmdUpper) > 4 && cmdUpper[4] >= '1' && cmdUpper[4] <= '3')
+  {
     laserNum = cmdUpper[4] - '0';
   }
 
   // Check for :STATE or :LASER:STATE suffix
-  char* statePos = strstr(cmdUpper, ":STAT");
-  if (!statePos) {
+  char *statePos = strstr(cmdUpper, ":STAT");
+  if (!statePos)
+  {
     pushError(ERR_INVALID_COMMAND);
     return;
   }
 
-  if (laserNum < 1 || laserNum > NUM_LASERS) {
+  if (laserNum < 1 || laserNum > NUM_LASERS)
+  {
     pushError(ERR_PARAMETER_OUT_OF_RANGE);
     return;
   }
 
-  if (isQuery) {
+  if (isQuery)
+  {
     // Query laser state
     bool state = getLaserState(laserNum);
     Serial.println(state ? "1" : "0");
-  } else {
+  }
+  else
+  {
     // Set laser state - find parameter after space
-    char* param = strchr(cmdOriginal, ' ');
-    if (!param) {
+    char *param = strchr(cmdOriginal, ' ');
+    if (!param)
+    {
       pushError(ERR_MISSING_PARAMETER);
       return;
     }
     param++; // Skip space
 
     // Parse ON/OFF/1/0
-    if (strcasecmp(param, "ON") == 0 || strcmp(param, "1") == 0) {
+    if (strcasecmp(param, "ON") == 0 || strcmp(param, "1") == 0)
+    {
       setLaser(laserNum, true);
-    } else if (strcasecmp(param, "OFF") == 0 || strcmp(param, "0") == 0) {
+    }
+    else if (strcasecmp(param, "OFF") == 0 || strcmp(param, "0") == 0)
+    {
       setLaser(laserNum, false);
-    } else {
+    }
+    else
+    {
       pushError(ERR_INVALID_PARAMETER);
     }
   }
 }
 
-void processOutputCommand(char* cmdUpper, char* cmdOriginal, bool isQuery) {
+void processOutputCommand(char *cmdUpper, char *cmdOriginal, bool isQuery)
+{
   // Parse OUTPut[1-3][:STATe]
   int laserNum = 0;
 
   // Extract laser number if present
-  if (strlen(cmdUpper) > 4 && cmdUpper[4] >= '1' && cmdUpper[4] <= '3') {
+  if (strlen(cmdUpper) > 4 && cmdUpper[4] >= '1' && cmdUpper[4] <= '3')
+  {
     laserNum = cmdUpper[4] - '0';
-  } else {
+  }
+  else
+  {
     // OUTP without number defaults to laser 1
     laserNum = 1;
   }
 
-  if (laserNum < 1 || laserNum > NUM_LASERS) {
+  if (laserNum < 1 || laserNum > NUM_LASERS)
+  {
     pushError(ERR_PARAMETER_OUT_OF_RANGE);
     return;
   }
 
-  if (isQuery) {
+  if (isQuery)
+  {
     // Query laser state
     bool state = getLaserState(laserNum);
     Serial.println(state ? "1" : "0");
-  } else {
+  }
+  else
+  {
     // Set laser state
-    char* param = strchr(cmdOriginal, ' ');
-    if (!param) {
+    char *param = strchr(cmdOriginal, ' ');
+    if (!param)
+    {
       pushError(ERR_MISSING_PARAMETER);
       return;
     }
     param++;
 
-    if (strcasecmp(param, "ON") == 0 || strcmp(param, "1") == 0) {
+    if (strcasecmp(param, "ON") == 0 || strcmp(param, "1") == 0)
+    {
       setLaser(laserNum, true);
-    } else if (strcasecmp(param, "OFF") == 0 || strcmp(param, "0") == 0) {
+    }
+    else if (strcasecmp(param, "OFF") == 0 || strcmp(param, "0") == 0)
+    {
       setLaser(laserNum, false);
-    } else {
+    }
+    else
+    {
       pushError(ERR_INVALID_PARAMETER);
     }
   }
@@ -336,10 +402,18 @@ void processOutputCommand(char* cmdUpper, char* cmdOriginal, bool isQuery) {
 
 // ===== Laser Control Functions =====
 
-void setLaser(int laserNumber, bool state) {
-  if (laserNumber < 1 || laserNumber > NUM_LASERS) {
+void setLaser(int laserNumber, bool state)
+{
+  if (laserNumber < 1 || laserNumber > NUM_LASERS)
+  {
     pushError(ERR_PARAMETER_OUT_OF_RANGE);
     return;
+  }
+
+  // If turning this laser ON, turn all others OFF first (exclusive operation)
+  if (state)
+  {
+    setAllLasers(false);  // Turn all off
   }
 
   int pin = laserPins[laserNumber - 1];
@@ -347,27 +421,47 @@ void setLaser(int laserNumber, bool state) {
   digitalWrite(pin, signalLevel);
 }
 
-void toggleLaser(int laserNumber) {
-  if (laserNumber < 1 || laserNumber > NUM_LASERS) {
+void toggleLaserExclusive(int laserNumber)
+{
+  if (laserNumber < 1 || laserNumber > NUM_LASERS)
+  {
     pushError(ERR_PARAMETER_OUT_OF_RANGE);
     return;
   }
 
   int pin = laserPins[laserNumber - 1];
   bool currentState = digitalRead(pin);
-  digitalWrite(pin, !currentState);
+  bool newState = !currentState;
+
+  // If turning this laser ON, turn all others OFF first (exclusive operation)
+  if (newState == LASER_ON_SIGNAL)
+  {
+    setAllLasers(false);  // Turn all off
+  }
+
+  digitalWrite(pin, newState);
 }
 
-void setAllLasers(bool state) {
+void toggleLaser(int laserNumber)
+{
+  // Kept for compatibility - calls exclusive version
+  toggleLaserExclusive(laserNumber);
+}
+
+void setAllLasers(bool state)
+{
   int signalLevel = state ? LASER_ON_SIGNAL : LASER_OFF_SIGNAL;
-  for (int i = 0; i < NUM_LASERS; i++) {
+  for (int i = 0; i < NUM_LASERS; i++)
+  {
     digitalWrite(laserPins[i], signalLevel);
   }
   digitalWrite(STATUS_LED, state ? HIGH : LOW);
 }
 
-bool getLaserState(int laserNumber) {
-  if (laserNumber < 1 || laserNumber > NUM_LASERS) {
+bool getLaserState(int laserNumber)
+{
+  if (laserNumber < 1 || laserNumber > NUM_LASERS)
+  {
     return false;
   }
   int pin = laserPins[laserNumber - 1];
@@ -375,15 +469,19 @@ bool getLaserState(int laserNumber) {
   return (pinState == LASER_ON_SIGNAL);
 }
 
-void printAllStates() {
-  for (int i = 0; i < NUM_LASERS; i++) {
-    if (i > 0) Serial.print(',');
+void printAllStates()
+{
+  for (int i = 0; i < NUM_LASERS; i++)
+  {
+    if (i > 0)
+      Serial.print(',');
     Serial.print(getLaserState(i + 1) ? "1" : "0");
   }
   Serial.println();
 }
 
-void resetDevice() {
+void resetDevice()
+{
   // Turn off all lasers
   setAllLasers(false);
   // Clear error queue
@@ -393,8 +491,10 @@ void resetDevice() {
 
 // ===== Error Queue Functions =====
 
-void pushError(int errorCode) {
-  if (errorQueueCount >= ERROR_QUEUE_SIZE) {
+void pushError(int errorCode)
+{
+  if (errorQueueCount >= ERROR_QUEUE_SIZE)
+  {
     // Queue overflow - replace oldest with overflow error
     errorQueue[errorQueueTail] = ERR_QUEUE_OVERFLOW;
     return;
@@ -405,8 +505,10 @@ void pushError(int errorCode) {
   errorQueueCount++;
 }
 
-void printError() {
-  if (errorQueueCount == 0) {
+void printError()
+{
+  if (errorQueueCount == 0)
+  {
     Serial.println("0,\"No error\"");
     return;
   }
@@ -421,22 +523,35 @@ void printError() {
   Serial.println("\"");
 }
 
-const char* getErrorMessage(int errorCode) {
-  switch (errorCode) {
-    case ERR_NO_ERROR: return "No error";
-    case ERR_INVALID_COMMAND: return "Invalid command";
-    case ERR_INVALID_PARAMETER: return "Invalid parameter";
-    case ERR_MISSING_PARAMETER: return "Missing parameter";
-    case ERR_PARAMETER_OUT_OF_RANGE: return "Parameter out of range";
-    case ERR_QUERY_ONLY: return "Query only command";
-    case ERR_COMMAND_ONLY: return "Command only (not a query)";
-    case ERR_EXECUTION_ERROR: return "Execution error";
-    case ERR_QUEUE_OVERFLOW: return "Error queue overflow";
-    default: return "Unknown error";
+const char *getErrorMessage(int errorCode)
+{
+  switch (errorCode)
+  {
+  case ERR_NO_ERROR:
+    return "No error";
+  case ERR_INVALID_COMMAND:
+    return "Invalid command";
+  case ERR_INVALID_PARAMETER:
+    return "Invalid parameter";
+  case ERR_MISSING_PARAMETER:
+    return "Missing parameter";
+  case ERR_PARAMETER_OUT_OF_RANGE:
+    return "Parameter out of range";
+  case ERR_QUERY_ONLY:
+    return "Query only command";
+  case ERR_COMMAND_ONLY:
+    return "Command only (not a query)";
+  case ERR_EXECUTION_ERROR:
+    return "Execution error";
+  case ERR_QUEUE_OVERFLOW:
+    return "Error queue overflow";
+  default:
+    return "Unknown error";
   }
 }
 
-void clearErrors() {
+void clearErrors()
+{
   errorQueueHead = 0;
   errorQueueTail = 0;
   errorQueueCount = 0;
@@ -444,19 +559,25 @@ void clearErrors() {
 
 // ===== Utility Functions =====
 
-void toUpperCase(char* str) {
-  for (int i = 0; str[i]; i++) {
-    if (str[i] >= 'a' && str[i] <= 'z') {
+void toUpperCase(char *str)
+{
+  for (int i = 0; str[i]; i++)
+  {
+    if (str[i] >= 'a' && str[i] <= 'z')
+    {
       str[i] = str[i] - 32;
     }
   }
 }
 
-int strcasecmp(const char* s1, const char* s2) {
-  while (*s1 && *s2) {
+int strcasecmp(const char *s1, const char *s2)
+{
+  while (*s1 && *s2)
+  {
     char c1 = (*s1 >= 'a' && *s1 <= 'z') ? *s1 - 32 : *s1;
     char c2 = (*s2 >= 'a' && *s2 <= 'z') ? *s2 - 32 : *s2;
-    if (c1 != c2) return c1 - c2;
+    if (c1 != c2)
+      return c1 - c2;
     s1++;
     s2++;
   }
