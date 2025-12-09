@@ -2,17 +2,19 @@
 Multi-Laser Controller Python Class
 Interfaces with Arduino-based laser TTL control system via serial communication
 
+Supports both legacy protocol and SCPI (Standard Commands for Programmable Instruments)
+
 Requirements:
 - pyserial: pip install pyserial
 - Arduino running the provided laser control firmware
 
-Author: Kok-Wei Bong
-Date: 2025-09-19
+Author: Kok-Wei Bong, Chris Betters
+Date: 2025-12-09
 """
 
 import serial
 import time
-from typing import Dict, Optional, Union
+from typing import Dict, Optional, Union, List, Tuple
 from enum import Enum
 import logging
 
@@ -45,6 +47,7 @@ class MultiLaserController:
         timeout: float = 2.0,
         num_lasers: int = 3,
         auto_connect: bool = True,
+        use_scpi: bool = False,
     ):
         """
         Initialise the MultiLaserController
@@ -55,11 +58,13 @@ class MultiLaserController:
             timeout: Serial read timeout in seconds (default: 2.0)
             num_lasers: Number of lasers connected to the Arduino (default: 3)
             auto_connect: Whether to automatically connect on initialisation
+            use_scpi: Use SCPI protocol instead of legacy protocol (default: False)
         """
         self.port = port
         self.baud_rate = baud_rate
         self.timeout = timeout
         self.num_lasers = num_lasers
+        self.use_scpi = use_scpi
 
         # Serial connection
         self.serial_conn: Optional[serial.Serial] = None
@@ -111,7 +116,19 @@ class MultiLaserController:
             # Test connection
             if self.serial_conn.is_open:
                 self.connected = True
-                self.logger.info(f"Connected to laser controller on {self.port}")
+
+                # If SCPI mode, verify with *IDN? command
+                if self.use_scpi:
+                    try:
+                        idn = self._query("*IDN?")
+                        self.logger.info(f"Connected to SCPI device: {idn}")
+                        # Reset device to known state
+                        self._send_command("*RST")
+                    except Exception as e:
+                        self.logger.warning(f"SCPI identification failed: {e}. Falling back to legacy mode.")
+                        self.use_scpi = False
+                else:
+                    self.logger.info(f"Connected to laser controller on {self.port}")
 
                 # Ensure all lasers are OFF on startup
                 self.turn_off_all()
@@ -162,6 +179,97 @@ class MultiLaserController:
             self.logger.error(f"Communication error: {e}")
             return False
 
+    def _read_response(self) -> str:
+        """
+        Read response from the device (used in SCPI mode)
+
+        Returns:
+            Response string without newline
+        """
+        if not self.connected or not self.serial_conn:
+            raise LaserControllerError("Not connected to laser controller")
+
+        try:
+            response = self.serial_conn.readline().decode('utf-8').strip()
+            self.logger.debug(f"Received: {response}")
+            return response
+        except serial.SerialException as e:
+            self.logger.error(f"Read error: {e}")
+            raise LaserControllerError(f"Communication error: {e}")
+
+    def _query(self, command: str) -> str:
+        """
+        Send query and read response (SCPI mode)
+
+        Args:
+            command: SCPI query string (should end with '?')
+
+        Returns:
+            Response string
+        """
+        self._send_command(command)
+        return self._read_response()
+
+    def check_errors(self) -> List[Tuple[int, str]]:
+        """
+        Check and retrieve all errors from SCPI error queue
+
+        Returns:
+            List of (error_code, error_message) tuples
+
+        Note: Only works in SCPI mode
+        """
+        if not self.use_scpi:
+            return []
+
+        errors = []
+        while True:
+            try:
+                response = self._query("SYST:ERR?")
+                # Parse "code,\"message\"" format
+                parts = response.split(',', 1)
+                error_code = int(parts[0])
+                error_msg = parts[1].strip('"') if len(parts) > 1 else "Unknown"
+
+                if error_code == 0:
+                    break  # No more errors
+
+                errors.append((error_code, error_msg))
+                self.logger.warning(f"Device error {error_code}: {error_msg}")
+            except Exception as e:
+                self.logger.error(f"Error checking error queue: {e}")
+                break
+
+        return errors
+
+    def get_scpi_version(self) -> Optional[str]:
+        """
+        Get SCPI version (SCPI mode only)
+
+        Returns:
+            SCPI version string or None if not in SCPI mode
+        """
+        if not self.use_scpi:
+            return None
+        try:
+            return self._query("SYST:VERS?")
+        except Exception:
+            return None
+
+    def identify(self) -> Optional[str]:
+        """
+        Get device identification string (SCPI mode only)
+
+        Returns:
+            Identification string or None if not in SCPI mode
+        """
+        if not self.use_scpi:
+            return None
+        try:
+            return self._query("*IDN?")
+        except Exception:
+            return None
+
     def toggle_laser(self, laser_number: int) -> bool:
         """
         Toggle a specific laser on/off
@@ -198,14 +306,25 @@ class MultiLaserController:
         Returns:
             bool: True if command successful, False otherwise
         """
+        if not (1 <= laser_number <= self.num_lasers):
+            raise ValueError(f"Laser number must be between 1 and {self.num_lasers}")
+
         if isinstance(state, LaserState):
             target_state = state
         else:
             target_state = LaserState.ON if state else LaserState.OFF
 
-        current_state = self.laser_states[laser_number]
+        # In SCPI mode, use SCPI commands directly
+        if self.use_scpi:
+            state_str = "ON" if target_state == LaserState.ON else "OFF"
+            if self._send_command(f"SOUR{laser_number}:STAT {state_str}"):
+                self.laser_states[laser_number] = target_state
+                self.logger.info(f"Laser {laser_number} set to {target_state.name}")
+                return True
+            return False
 
-        # Only toggle if current state differs from target
+        # Legacy mode: toggle if state differs
+        current_state = self.laser_states[laser_number]
         if current_state != target_state:
             return self.toggle_laser(laser_number)
 
@@ -252,6 +371,16 @@ class MultiLaserController:
         if not (1 <= laser_number <= self.num_lasers):
             raise ValueError(f"Laser number must be between 1 and {self.num_lasers}")
 
+        # In SCPI mode, query the actual state from device
+        if self.use_scpi:
+            try:
+                response = self._query(f"SOUR{laser_number}:STAT?")
+                state = LaserState.ON if response == "1" else LaserState.OFF
+                self.laser_states[laser_number] = state  # Update cache
+                return state
+            except Exception as e:
+                self.logger.warning(f"Failed to query laser state: {e}. Using cached state.")
+
         return self.laser_states[laser_number]
 
     def get_all_laser_states(self) -> Dict[int, LaserState]:
@@ -261,6 +390,17 @@ class MultiLaserController:
         Returns:
             Dict[int, LaserState]: Dictionary mapping laser numbers to states
         """
+        # In SCPI mode, query all states at once for efficiency
+        if self.use_scpi:
+            try:
+                response = self._query("STAT?")
+                states = response.split(',')
+                for i, state_str in enumerate(states[:self.num_lasers], start=1):
+                    state = LaserState.ON if state_str == "1" else LaserState.OFF
+                    self.laser_states[i] = state
+            except Exception as e:
+                self.logger.warning(f"Failed to query all states: {e}. Using cached states.")
+
         return self.laser_states.copy()
 
     def flash_laser(
