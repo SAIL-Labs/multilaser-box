@@ -4,6 +4,9 @@ Setup configuration for Multi-Laser Controller package
 
 from setuptools import setup, find_packages
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).parent / "multilaser"))
+from _version import __version__
 
 # Read the contents of README file
 this_directory = Path(__file__).parent
@@ -11,13 +14,13 @@ long_description = (this_directory / "README.md").read_text()
 
 setup(
     name="multilaser-controller",
-    version="1.1.0",
+    version=__version__,
     author="Kok-Wei Bong, Chris Betters",
     author_email="",
     description="A Python-based graphical interface for controlling multiple lasers and Thorlabs power meters",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/multilaser-box",
+    url="https://github.com/SAIL-Labs/multilaser-box",
     packages=find_packages(exclude=["tests", "dist", "build"]),
     classifiers=[
         "Development Status :: 4 - Beta",

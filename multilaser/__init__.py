@@ -4,7 +4,8 @@ Multi-Laser Controller Package
 A Python-based control system for managing multiple lasers and Thorlabs power meters.
 """
 
-__version__ = "1.1.0"
+from multilaser._version import __version__
+
 __author__ = "Kok-Wei Bong, Chris Betters"
 
 # Lazy imports to avoid requiring all dependencies at package import time
