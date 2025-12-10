@@ -38,7 +38,7 @@ jobs:
           mkdir -p release/windows
           copy dist\MultiLaserController.exe release\windows\
           copy README.md release\windows\
-          copy multilaser_manual.md release\windows\
+          copy docs/multilaser_manual.md release\windows\
           xcopy /E /I laser_ttl_controller release\windows\laser_ttl_controller
 
       - name: Upload Windows artifact
