@@ -1,0 +1,15 @@
+# Multi-Laser Controller Requirements
+# Install with: pip install -r requirements.txt
+
+# Core dependencies
+numpy
+pyserial>=3.5
+PyQt6>=6.0
+
+# Optional: Power meter support
+# Uncomment the following lines to enable Thorlabs PM100USB integration:
+# pyvisa>=1.11.0
+# pyvisa-py>=0.5.0
+
+# Development dependencies (optional)
+# pyinstaller  # For building standalone executables
