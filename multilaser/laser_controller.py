@@ -393,6 +393,43 @@ class MultiLaserController:
 
         return self.laser_states.copy()
 
+    def get_laser_wavelength(self, laser_number: int) -> Optional[int]:
+        """
+        Get wavelength of a specific laser in nanometers
+
+        Args:
+            laser_number: Laser number (1-based index)
+
+        Returns:
+            int: Wavelength in nanometers, or None if not available
+        """
+        if not (1 <= laser_number <= self.num_lasers):
+            raise ValueError(f"Laser number must be between 1 and {self.num_lasers}")
+
+        # In SCPI mode, query wavelength from firmware
+        if self.use_scpi:
+            try:
+                response = self._query(f"SOUR{laser_number}:WAV?")
+                return int(response)
+            except Exception as e:
+                self.logger.warning(f"Failed to query wavelength for laser {laser_number}: {e}")
+                return None
+
+        # Legacy mode - no wavelength information available
+        return None
+
+    def get_all_wavelengths(self) -> Dict[int, Optional[int]]:
+        """
+        Get wavelengths of all lasers
+
+        Returns:
+            Dict[int, Optional[int]]: Dictionary mapping laser numbers to wavelengths in nm
+        """
+        wavelengths = {}
+        for laser_num in range(1, self.num_lasers + 1):
+            wavelengths[laser_num] = self.get_laser_wavelength(laser_num)
+        return wavelengths
+
     def flash_laser(
         self, laser_number: int, flash_count: int = 3, flash_duration: float = 0.5
     ) -> bool:

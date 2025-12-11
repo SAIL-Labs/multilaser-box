@@ -98,8 +98,9 @@ class LaserControlGUI(QMainWindow):
         self.controller = None
         self.num_lasers = 3
 
-        # Store LED indicators and toggle buttons
+        # Store LED indicators, labels, and toggle buttons
         self.led_indicators = []
+        self.laser_labels = []
         self.toggle_buttons = []
 
         # Power meter tab reference
@@ -219,10 +220,11 @@ class LaserControlGUI(QMainWindow):
             self.led_indicators.append(led)
             led_container.addWidget(led, alignment=Qt.AlignmentFlag.AlignCenter)
 
-            # Label below LED
+            # Label below LED (will be updated with wavelength after connection)
             label = QLabel(f"Laser {i}")
             label.setFont(QFont("Arial", 11, QFont.Weight.Bold))
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.laser_labels.append(label)
             led_container.addWidget(label)
 
             led_layout.addLayout(led_container)
@@ -399,6 +401,9 @@ class LaserControlGUI(QMainWindow):
 
             # Update LED indicators
             self.update_led_states()
+
+            # Query and display wavelengths (SCPI mode only)
+            self.update_wavelength_labels()
 
         except LaserControllerError as e:
             QMessageBox.critical(
@@ -578,6 +583,27 @@ class LaserControlGUI(QMainWindow):
         for i, led in enumerate(self.led_indicators, start=1):
             state = self.controller.get_laser_state(i)
             led.set_state(state == LaserState.ON)
+
+    def update_wavelength_labels(self):
+        """Update laser labels with wavelength information (SCPI mode only)"""
+        if not self.controller or not self.controller.connected:
+            return
+
+        # Only works with SCPI firmware
+        if not self.controller.use_scpi:
+            return
+
+        try:
+            wavelengths = self.controller.get_all_wavelengths()
+            for i, label in enumerate(self.laser_labels, start=1):
+                wavelength = wavelengths.get(i)
+                if wavelength:
+                    label.setText(f"Laser {i}\n({wavelength} nm)")
+                else:
+                    label.setText(f"Laser {i}")
+        except Exception as e:
+            # If wavelength query fails, just keep default labels
+            print(f"Could not query wavelengths: {e}")
 
     def closeEvent(self, event):
         """Handle window close event"""

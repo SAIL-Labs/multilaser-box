@@ -37,6 +37,11 @@ const int LASER_OFF_SIGNAL = HIGH; // HIGH (5V) turns laser OFF
 // Number of active lasers (1, 2, or 3)
 const int NUM_LASERS = 3;
 
+// Laser wavelengths in nanometers (for identification/display)
+const int LASER1_WAVELENGTH = 1064;  // Laser 1: 1064 nm
+const int LASER2_WAVELENGTH = 1310;  // Laser 2: 1310 nm
+const int LASER3_WAVELENGTH = 1550;  // Laser 3: 1550 nm
+
 // ===== END CONFIGURATION SECTION =====
 
 // Status LED pin (built-in LED on most Arduino boards)
@@ -44,6 +49,9 @@ const int STATUS_LED = 13;
 
 // Array to store laser pin numbers for easier iteration
 int laserPins[] = {LASER1_PIN, LASER2_PIN, LASER3_PIN};
+
+// Array to store laser wavelengths for easier iteration
+int laserWavelengths[] = {LASER1_WAVELENGTH, LASER2_WAVELENGTH, LASER3_WAVELENGTH};
 
 // SCPI error queue
 #define ERROR_QUEUE_SIZE 10
@@ -290,13 +298,32 @@ void processSCPICommand(char *cmdUpper, char *cmdOriginal, bool isQuery)
 
 void processSourceCommand(char *cmdUpper, char *cmdOriginal, bool isQuery)
 {
-  // Parse SOURce[1-3]:LASeR:STATe or SOURce[1-3]:STATe
+  // Parse SOURce[1-3]:LASeR:STATe, SOURce[1-3]:STATe, or SOURce[1-3]:WAVelength?
   int laserNum = 0;
 
   // Extract laser number if present
   if (strlen(cmdUpper) > 4 && cmdUpper[4] >= '1' && cmdUpper[4] <= '3')
   {
     laserNum = cmdUpper[4] - '0';
+  }
+
+  // Check for :WAVelength? query
+  char *wavPos = strstr(cmdUpper, ":WAV");
+  if (wavPos)
+  {
+    if (laserNum < 1 || laserNum > NUM_LASERS)
+    {
+      pushError(ERR_PARAMETER_OUT_OF_RANGE);
+      return;
+    }
+    if (!isQuery)
+    {
+      pushError(ERR_QUERY_ONLY);
+      return;
+    }
+    // Return wavelength in nanometers
+    Serial.println(laserWavelengths[laserNum - 1]);
+    return;
   }
 
   // Check for :STATE or :LASER:STATE suffix
