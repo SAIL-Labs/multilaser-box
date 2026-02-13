@@ -131,6 +131,7 @@ class PowerMeterTab(QWidget):
         self.controller = PowerMeterController()
         self.available_meters = []
         self.frozen = False
+        self.active_laser_number = None
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update_readings)
 
@@ -275,6 +276,10 @@ class PowerMeterTab(QWidget):
         self.calibration_spin.setEnabled(False)
         self.calibration_spin.valueChanged.connect(self._on_calibration_changed)
         calibration_layout.addWidget(self.calibration_spin)
+
+        self.calibration_laser_label = QLabel("")
+        self.calibration_laser_label.setStyleSheet("color: #7f8c8d; font-style: italic;")
+        calibration_layout.addWidget(self.calibration_laser_label)
 
         calibration_layout.addSpacing(10)
 
@@ -472,9 +477,8 @@ class PowerMeterTab(QWidget):
             self.apply_settings_btn.setEnabled(True)
             self.freeze_btn.setEnabled(True)
 
-            # Enable calibration only with 2 meters
-            self.calibrate_btn.setEnabled(num_meters == 2)
-            self.calibration_spin.setEnabled(True)
+            # Calibration controls remain disabled until a laser is toggled on
+            # (set_calibration_factor() enables them when called from GUI)
 
             # Disable scan and update connect button
             self.scan_btn.setEnabled(False)
@@ -517,9 +521,10 @@ class PowerMeterTab(QWidget):
         # Disconnect
         self.controller.disconnect_all()
 
-        # Reset calibration
+        # Reset calibration state
         self.controller.calibration_factor = 1.0
-        self.calibration_spin.setValue(1.0)
+        self.active_laser_number = None
+        self.calibration_laser_label.setText("")
 
         # Reset UI
         self.ref_combo.clear()
@@ -621,6 +626,29 @@ class PowerMeterTab(QWidget):
                 self, "Assignment Error", f"Failed to assign roles:\n{str(e)}"
             )
 
+    def set_calibration_factor(self, factor: float, laser_number: int = None):
+        """Set the calibration factor for the given laser.
+
+        Called by LaserControlGUI.sync_power_meter_calibration() when a laser
+        is toggled on/off.
+        """
+        self.active_laser_number = laser_number
+
+        # Update label to show which laser's calibration is active
+        if laser_number is not None:
+            self.calibration_laser_label.setText(f"(Laser {laser_number})")
+            self.calibration_spin.setEnabled(True)
+            self.calibrate_btn.setEnabled(
+                len(self.controller.get_power_meters()) == 2
+            )
+        else:
+            self.calibration_laser_label.setText("(No laser active)")
+            self.calibration_spin.setEnabled(False)
+            self.calibrate_btn.setEnabled(False)
+
+        # Set spin box — triggers _on_calibration_changed → controller sync
+        self.calibration_spin.setValue(factor)
+
     def set_wavelength(self, wavelength_nm: int):
         """Set the wavelength on the GUI and apply to connected meters"""
         self.wavelength_spin.setValue(wavelength_nm)
@@ -682,14 +710,29 @@ class PowerMeterTab(QWidget):
         """Handle manual calibration factor change"""
         if value > 0:
             self.controller.set_calibration_factor(value)
+            # Persist to the active laser's QSettings key
+            if self.active_laser_number is not None:
+                self.settings.setValue(
+                    f"laser/calibration_factor_{self.active_laser_number}", value
+                )
 
     def auto_calibrate(self):
         """Auto-calibrate using current meter readings"""
+        if self.active_laser_number is None:
+            QMessageBox.warning(
+                self, "No Laser Active",
+                "Turn on a laser before calibrating."
+            )
+            return
         try:
             factor = self.controller.calibrate_from_measurements()
             self.calibration_spin.blockSignals(True)
             self.calibration_spin.setValue(factor)
             self.calibration_spin.blockSignals(False)
+            # Persist to the active laser's QSettings key
+            self.settings.setValue(
+                f"laser/calibration_factor_{self.active_laser_number}", factor
+            )
         except PowerMeterError as e:
             QMessageBox.critical(
                 self, "Calibration Error", f"Failed to calibrate:\n{str(e)}"
@@ -734,9 +777,8 @@ class PowerMeterTab(QWidget):
         self.update_rate_spin.setValue(
             self.settings.value("power_meter/update_rate", defaultValue=10.0, type=float)
         )
-        self.calibration_spin.setValue(
-            self.settings.value("power_meter/calibration_factor", defaultValue=1.0, type=float)
-        )
+        # Calibration factor is now per-laser and loaded via
+        # set_calibration_factor() when a laser is toggled on
         self._saved_ref_resource = self.settings.value(
             "power_meter/reference_resource", defaultValue="", type=str
         )
@@ -749,7 +791,7 @@ class PowerMeterTab(QWidget):
         self.settings.setValue("power_meter/wavelength", self.wavelength_spin.value())
         self.settings.setValue("power_meter/averaging", self.averaging_spin.value())
         self.settings.setValue("power_meter/update_rate", self.update_rate_spin.value())
-        self.settings.setValue("power_meter/calibration_factor", self.calibration_spin.value())
+        # Calibration factor is saved per-laser in _on_calibration_changed()
 
         # Save role assignment by VISA resource string when meters are connected
         meters = self.controller.get_power_meters()
@@ -770,7 +812,7 @@ class PowerMeterTab(QWidget):
         self.wavelength_spin.valueChanged.connect(self.save_settings)
         self.averaging_spin.valueChanged.connect(self.save_settings)
         self.update_rate_spin.valueChanged.connect(self.save_settings)
-        self.calibration_spin.valueChanged.connect(self.save_settings)
+        # calibration_spin saves per-laser in _on_calibration_changed()
         self.ref_combo.currentIndexChanged.connect(self.save_settings)
         self.target_combo.currentIndexChanged.connect(self.save_settings)
 

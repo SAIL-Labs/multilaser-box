@@ -23,8 +23,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMessageBox,
     QTabWidget,
-    QDoubleSpinBox,
-    QGroupBox,
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings
 from PyQt6.QtGui import QFont
@@ -106,7 +104,6 @@ class LaserControlGUI(QMainWindow):
         self.led_indicators = []
         self.laser_labels = []
         self.toggle_buttons = []
-        self.correction_spins = []
 
         # Power meter tab reference
         self.power_meter_tab = None
@@ -326,32 +323,6 @@ class LaserControlGUI(QMainWindow):
 
         tab_layout.addLayout(extra_controls_layout)
 
-        # === Power Correction Factors ===
-        correction_group = QGroupBox("Power Correction Factors")
-        correction_layout = QHBoxLayout()
-        correction_layout.setSpacing(30)
-
-        for i in range(1, self.num_lasers + 1):
-            container = QHBoxLayout()
-            label = QLabel(f"Laser {i}:")
-            label.setFont(QFont("Arial", 10))
-            container.addWidget(label)
-
-            spin = QDoubleSpinBox()
-            spin.setRange(0.001, 100.0)
-            spin.setValue(1.0)
-            spin.setDecimals(4)
-            spin.setSingleStep(0.01)
-            spin.setToolTip(f"Power correction factor for Laser {i}")
-            self.correction_spins.append(spin)
-            container.addWidget(spin)
-
-            correction_layout.addLayout(container)
-
-        correction_layout.addStretch()
-        correction_group.setLayout(correction_layout)
-        tab_layout.addWidget(correction_group)
-
         tab_layout.addStretch()
 
         return tab_widget
@@ -513,6 +484,7 @@ class LaserControlGUI(QMainWindow):
             self.controller.toggle_laser(laser_number)
             self.update_led_states()
             self.sync_power_meter_wavelength()
+            self.sync_power_meter_calibration()
             self.statusBar().showMessage(f"Toggled Laser {laser_number}")
 
         except Exception as e:
@@ -532,6 +504,7 @@ class LaserControlGUI(QMainWindow):
         try:
             self.controller.turn_off_all()
             self.update_led_states()
+            self.sync_power_meter_calibration()
             self.statusBar().showMessage("All lasers turned OFF")
         except Exception as e:
             QMessageBox.critical(
@@ -636,6 +609,25 @@ class LaserControlGUI(QMainWindow):
         except Exception:
             pass
 
+    def sync_power_meter_calibration(self):
+        """Set power meter calibration factor to match the currently active laser"""
+        if not self.power_meter_tab or not self.controller or not self.controller.connected:
+            return
+
+        try:
+            # Find which laser is ON and load its saved calibration factor
+            for i in range(1, self.controller.num_lasers + 1):
+                if self.controller.get_laser_state(i) == LaserState.ON:
+                    saved_cal = self.settings.value(
+                        f"laser/calibration_factor_{i}", defaultValue=1.0, type=float
+                    )
+                    self.power_meter_tab.set_calibration_factor(saved_cal, laser_number=i)
+                    return
+            # No laser ON — reset calibration display
+            self.power_meter_tab.set_calibration_factor(1.0, laser_number=None)
+        except Exception:
+            pass
+
     def update_wavelength_labels(self):
         """Update laser labels with wavelength information (SCPI mode only)"""
         if not self.controller or not self.controller.connected:
@@ -671,12 +663,6 @@ class LaserControlGUI(QMainWindow):
         if index >= 0:
             self.baud_combo.setCurrentIndex(index)
 
-        for i in range(self.num_lasers):
-            val = self.settings.value(
-                f"laser/correction_factor_{i + 1}", defaultValue=1.0, type=float
-            )
-            self.correction_spins[i].setValue(val)
-
     def save_settings(self):
         """Persist current settings to QSettings"""
         port = self.port_combo.currentData()
@@ -685,17 +671,10 @@ class LaserControlGUI(QMainWindow):
 
         self.settings.setValue("laser/baud_rate", self.baud_combo.currentText())
 
-        for i in range(self.num_lasers):
-            self.settings.setValue(
-                f"laser/correction_factor_{i + 1}", self.correction_spins[i].value()
-            )
-
     def connect_settings_signals(self):
         """Connect widget change signals to save_settings (after initial load)"""
         self.port_combo.currentIndexChanged.connect(self.save_settings)
         self.baud_combo.currentIndexChanged.connect(self.save_settings)
-        for spin in self.correction_spins:
-            spin.valueChanged.connect(self.save_settings)
 
     def closeEvent(self, event):
         """Handle window close event"""
