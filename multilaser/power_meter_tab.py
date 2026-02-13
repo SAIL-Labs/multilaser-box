@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QDoubleSpinBox,
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QSettings
 from PyQt6.QtGui import QFont
 from typing import Optional
 
@@ -125,8 +125,9 @@ class PowerDisplay(QWidget):
 class PowerMeterTab(QWidget):
     """Main power meter tab widget"""
 
-    def __init__(self, parent=None):
+    def __init__(self, settings: QSettings = None, parent=None):
         super().__init__(parent)
+        self.settings = settings or QSettings("MultiLaserBox", "LaserController")
         self.controller = PowerMeterController()
         self.available_meters = []
         self.frozen = False
@@ -134,6 +135,8 @@ class PowerMeterTab(QWidget):
         self.update_timer.timeout.connect(self.update_readings)
 
         self.init_ui()
+        self.load_settings()
+        self.connect_settings_signals()
 
     def init_ui(self):
         """Initialize the user interface"""
@@ -417,14 +420,34 @@ class PowerMeterTab(QWidget):
                 self.ref_combo.addItem(label, i)
                 self.target_combo.addItem(label, i)
 
-            if num_meters == 2:
-                # Default: Meter 0 = Reference, Meter 1 = Target
-                self.ref_combo.setCurrentIndex(1)      # index 1 = Meter 0
-                self.target_combo.setCurrentIndex(2)    # index 2 = Meter 1
-            else:
-                # Single meter: assign as Target by default
-                self.ref_combo.setCurrentIndex(0)       # None
-                self.target_combo.setCurrentIndex(1)    # Meter 0
+            # Restore saved role assignment if the same meters are present
+            role_restored = False
+            if self._saved_ref_resource or self._saved_target_resource:
+                ref_idx = None   # meter index (not combo index)
+                target_idx = None
+                for i, pm in enumerate(meters):
+                    if pm.resource_name == self._saved_ref_resource:
+                        ref_idx = i
+                    if pm.resource_name == self._saved_target_resource:
+                        target_idx = i
+
+                if ref_idx is not None or target_idx is not None:
+                    # Convert meter index → combo index (+1 for "None" item)
+                    ref_combo_idx = (ref_idx + 1) if ref_idx is not None else 0
+                    target_combo_idx = (target_idx + 1) if target_idx is not None else 0
+                    # Don't allow both pointing at the same meter
+                    if ref_combo_idx != target_combo_idx or ref_combo_idx == 0:
+                        self.ref_combo.setCurrentIndex(ref_combo_idx)
+                        self.target_combo.setCurrentIndex(target_combo_idx)
+                        role_restored = True
+
+            if not role_restored:
+                if num_meters == 2:
+                    self.ref_combo.setCurrentIndex(1)      # Meter 0
+                    self.target_combo.setCurrentIndex(2)    # Meter 1
+                else:
+                    self.ref_combo.setCurrentIndex(0)       # None
+                    self.target_combo.setCurrentIndex(1)    # Meter 0
 
             self.ref_combo.blockSignals(False)
             self.target_combo.blockSignals(False)
@@ -699,6 +722,57 @@ class PowerMeterTab(QWidget):
         except Exception as e:
             # Don't pop up error dialogs during continuous reading
             logging.error(f"Error reading power meters: {str(e)}")
+
+    def load_settings(self):
+        """Restore power meter settings from QSettings"""
+        self.wavelength_spin.setValue(
+            self.settings.value("power_meter/wavelength", defaultValue=1310, type=int)
+        )
+        self.averaging_spin.setValue(
+            self.settings.value("power_meter/averaging", defaultValue=1, type=int)
+        )
+        self.update_rate_spin.setValue(
+            self.settings.value("power_meter/update_rate", defaultValue=10.0, type=float)
+        )
+        self.calibration_spin.setValue(
+            self.settings.value("power_meter/calibration_factor", defaultValue=1.0, type=float)
+        )
+        self._saved_ref_resource = self.settings.value(
+            "power_meter/reference_resource", defaultValue="", type=str
+        )
+        self._saved_target_resource = self.settings.value(
+            "power_meter/target_resource", defaultValue="", type=str
+        )
+
+    def save_settings(self):
+        """Persist current power meter settings to QSettings"""
+        self.settings.setValue("power_meter/wavelength", self.wavelength_spin.value())
+        self.settings.setValue("power_meter/averaging", self.averaging_spin.value())
+        self.settings.setValue("power_meter/update_rate", self.update_rate_spin.value())
+        self.settings.setValue("power_meter/calibration_factor", self.calibration_spin.value())
+
+        # Save role assignment by VISA resource string when meters are connected
+        meters = self.controller.get_power_meters()
+        if meters:
+            ref_idx = self.ref_combo.currentData()
+            target_idx = self.target_combo.currentData()
+            if ref_idx is not None and ref_idx < len(meters):
+                self.settings.setValue(
+                    "power_meter/reference_resource", meters[ref_idx].resource_name
+                )
+            if target_idx is not None and target_idx < len(meters):
+                self.settings.setValue(
+                    "power_meter/target_resource", meters[target_idx].resource_name
+                )
+
+    def connect_settings_signals(self):
+        """Connect widget change signals to save_settings (after initial load)"""
+        self.wavelength_spin.valueChanged.connect(self.save_settings)
+        self.averaging_spin.valueChanged.connect(self.save_settings)
+        self.update_rate_spin.valueChanged.connect(self.save_settings)
+        self.calibration_spin.valueChanged.connect(self.save_settings)
+        self.ref_combo.currentIndexChanged.connect(self.save_settings)
+        self.target_combo.currentIndexChanged.connect(self.save_settings)
 
     def cleanup(self):
         """Clean up resources when closing"""
