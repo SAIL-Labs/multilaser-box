@@ -479,6 +479,7 @@ class LaserControlGUI(QMainWindow):
 
             self.controller.toggle_laser(laser_number)
             self.update_led_states()
+            self.sync_power_meter_wavelength()
             self.statusBar().showMessage(f"Toggled Laser {laser_number}")
 
         except Exception as e:
@@ -583,6 +584,24 @@ class LaserControlGUI(QMainWindow):
         for i, led in enumerate(self.led_indicators, start=1):
             state = self.controller.get_laser_state(i)
             led.set_state(state == LaserState.ON)
+
+    def sync_power_meter_wavelength(self):
+        """Set power meter wavelength to match the currently active laser"""
+        if not self.power_meter_tab or not self.controller or not self.controller.connected:
+            return
+        if not self.controller.use_scpi:
+            return
+
+        try:
+            # Find which laser is ON
+            for i in range(1, self.controller.num_lasers + 1):
+                if self.controller.get_laser_state(i) == LaserState.ON:
+                    wavelength = self.controller.get_laser_wavelength(i)
+                    if wavelength:
+                        self.power_meter_tab.set_wavelength(wavelength)
+                    return
+        except Exception:
+            pass
 
     def update_wavelength_labels(self):
         """Update laser labels with wavelength information (SCPI mode only)"""
