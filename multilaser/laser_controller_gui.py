@@ -12,6 +12,9 @@ Date: 2025-09-29
 """
 
 import sys
+import time
+import webbrowser
+from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -23,9 +26,10 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMessageBox,
     QTabWidget,
+    QProgressDialog,
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QAction
 import serial.tools.list_ports
 from typing import List
 
@@ -40,6 +44,13 @@ try:
 except ImportError:
     POWER_METER_AVAILABLE = False
     print("Warning: Power meter tab not available. Install pyvisa and pyvisa-py to enable.")
+
+from multilaser.updater import (
+    UpdateCheckWorker,
+    DownloadWorker,
+    apply_update,
+    get_current_exe_path,
+)
 
 
 class LEDIndicator(QLabel):
@@ -111,15 +122,36 @@ class LaserControlGUI(QMainWindow):
         # Emergency stop state
         self.emergency_stop_active = False
 
+        # Update check state
+        self._pending_update = None
+        self._update_manual = False
+
         self.init_ui()
         self.populate_com_ports()
         self.load_settings()
         self.connect_settings_signals()
 
+        # Deferred update check on startup (3-second delay)
+        QTimer.singleShot(3000, self._startup_update_check)
+
     def init_ui(self):
         """Initialise the user interface"""
         self.setWindowTitle(f"Multi-Laser Controller v{__version__}")
         self.setGeometry(100, 100, 800, 600)
+
+        # Menu bar
+        menu_bar = self.menuBar()
+        help_menu = menu_bar.addMenu("Help")
+
+        check_updates_action = QAction("Check for Updates...", self)
+        check_updates_action.triggered.connect(
+            lambda: self._check_for_update(manual=True)
+        )
+        help_menu.addAction(check_updates_action)
+
+        about_action = QAction("About", self)
+        about_action.triggered.connect(self._show_about)
+        help_menu.addAction(about_action)
 
         # Create central widget and main layout
         central_widget = QWidget()
@@ -675,6 +707,187 @@ class LaserControlGUI(QMainWindow):
         """Connect widget change signals to save_settings (after initial load)"""
         self.port_combo.currentIndexChanged.connect(self.save_settings)
         self.baud_combo.currentIndexChanged.connect(self.save_settings)
+
+    # ------------------------------------------------------------------
+    # Auto-update
+    # ------------------------------------------------------------------
+
+    def _startup_update_check(self):
+        """Check for updates on startup, at most once per day."""
+        last_check = self.settings.value("update/last_check", defaultValue=0, type=int)
+        now = int(time.time())
+        one_day = 86400
+
+        if now - last_check < one_day:
+            return  # Already checked today
+
+        self._check_for_update(manual=False)
+
+    def _check_for_update(self, manual: bool = False):
+        """Launch background update check.
+
+        Args:
+            manual: If True, show errors and 'up to date' messages.
+                    If False (startup), be completely silent unless an update is found.
+        """
+        self._update_manual = manual
+        self._pending_update = None
+        self._update_worker = UpdateCheckWorker(__version__, parent=self)
+        self._update_worker.update_available.connect(self._on_update_available)
+        if manual:
+            self._update_worker.error_occurred.connect(self._on_update_error)
+            self._update_worker.check_finished.connect(self._on_update_check_finished)
+        self._update_worker.finished.connect(self._update_worker.deleteLater)
+        self._update_worker.start()
+
+        # Record check time
+        self.settings.setValue("update/last_check", int(time.time()))
+
+    def _on_update_available(self, info):
+        """Handle update found — show dialog to user."""
+        # Check if user chose to skip this version (only for automatic checks)
+        skipped = self.settings.value("update/skip_version", defaultValue="", type=str)
+        if not self._update_manual and skipped == info.latest_version:
+            return
+
+        self._pending_update = info
+        is_frozen = getattr(sys, "frozen", False)
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Update Available")
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setText(
+            f"A new version of Multi-Laser Controller is available.\n\n"
+            f"Current version: {__version__}\n"
+            f"New version: {info.latest_version}"
+        )
+
+        if info.release_notes:
+            msg.setDetailedText(info.release_notes)
+
+        if is_frozen:
+            update_btn = msg.addButton("Update Now", QMessageBox.ButtonRole.AcceptRole)
+        else:
+            update_btn = msg.addButton("View Release", QMessageBox.ButtonRole.AcceptRole)
+
+        msg.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        skip_btn = msg.addButton("Skip This Version", QMessageBox.ButtonRole.DestructiveRole)
+
+        msg.exec()
+
+        clicked = msg.clickedButton()
+        if clicked == update_btn:
+            if is_frozen:
+                self._start_download(info)
+            else:
+                webbrowser.open(info.html_url)
+        elif clicked == skip_btn:
+            self.settings.setValue("update/skip_version", info.latest_version)
+
+    def _start_download(self, info):
+        """Download the update with a progress dialog."""
+        self._progress = QProgressDialog(
+            f"Downloading v{info.latest_version}...",
+            "Cancel",
+            0, 100,
+            self,
+        )
+        self._progress.setWindowTitle("Updating")
+        self._progress.setMinimumDuration(0)
+        self._progress.setAutoClose(False)
+        self._progress.setAutoReset(False)
+
+        self._download_worker = DownloadWorker(info.download_url, parent=self)
+        self._download_worker.progress.connect(self._on_download_progress)
+        self._download_worker.download_complete.connect(self._on_download_complete)
+        self._download_worker.error_occurred.connect(self._on_download_error)
+        self._download_worker.finished.connect(self._download_worker.deleteLater)
+
+        self._progress.canceled.connect(self._download_worker.terminate)
+
+        self._download_worker.start()
+
+    def _on_download_progress(self, downloaded: int, total: int):
+        """Update progress dialog."""
+        if total > 0:
+            percent = int(downloaded * 100 / total)
+            self._progress.setValue(percent)
+            self._progress.setLabelText(
+                f"Downloading... {downloaded // 1024} / {total // 1024} KB"
+            )
+        else:
+            self._progress.setLabelText(f"Downloading... {downloaded // 1024} KB")
+
+    def _on_download_complete(self, exe_path_str: str):
+        """Download finished — apply the update."""
+        self._progress.close()
+
+        new_exe = Path(exe_path_str)
+
+        reply = QMessageBox.information(
+            self,
+            "Update Ready",
+            "Update downloaded successfully.\n\n"
+            "The application will close and restart with the new version.\n"
+            "This takes a few seconds.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+        )
+
+        if reply == QMessageBox.StandardButton.Ok:
+            # Disconnect from laser controller safely
+            if self.controller and self.controller.connected:
+                self.disconnect_from_controller()
+
+            # Clean up power meter
+            if self.power_meter_tab:
+                self.power_meter_tab.cleanup()
+
+            # Apply the update (spawns batch script)
+            apply_update(new_exe)
+
+            # Exit the application
+            QApplication.instance().quit()
+
+    def _on_download_error(self, error_msg: str):
+        """Handle download failure."""
+        self._progress.close()
+        QMessageBox.critical(
+            self,
+            "Download Failed",
+            f"Failed to download the update:\n\n{error_msg}\n\n"
+            "You can download it manually from GitHub.",
+        )
+
+    def _on_update_error(self, error_msg: str):
+        """Show error on manual check failure."""
+        QMessageBox.warning(
+            self,
+            "Update Check Failed",
+            f"Could not check for updates:\n\n{error_msg}\n\n"
+            "Check your internet connection or try again later.",
+        )
+
+    def _on_update_check_finished(self):
+        """Called when manual check finishes — show 'up to date' if no update was found."""
+        if self._pending_update is None:
+            QMessageBox.information(
+                self,
+                "No Updates",
+                f"You are running the latest version ({__version__}).",
+            )
+
+    def _show_about(self):
+        """Show about dialog."""
+        is_frozen = getattr(sys, "frozen", False)
+        mode = "Standalone executable" if is_frozen else "Running from source"
+        QMessageBox.about(
+            self,
+            "About Multi-Laser Controller",
+            f"Multi-Laser Controller v{__version__}\n\n"
+            f"{mode}\n\n"
+            f"Authors: Kok-Wei Bong, Chris Betters\n"
+            f"https://github.com/SAIL-Labs/multilaser-box",
+        )
 
     def closeEvent(self, event):
         """Handle window close event"""

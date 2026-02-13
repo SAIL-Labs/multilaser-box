@@ -31,6 +31,12 @@ jobs:
         run: |
           pip install numpy pyserial PyQt6 pyvisa pyvisa-py psutil pyinstaller pyusb
 
+      - name: Set version for build
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          Set-Content -Path multilaser/_version.py -Value "__version__ = `"$version`""
+          Write-Host "Building version: $version"
+
       - name: Build Windows executable
         run: |
           pyinstaller --onefile --windowed --name=MultiLaserController --icon=figures/icon.ico --add-data="figures/icon.ico;figures" --hidden-import=pyvisa --hidden-import=pyvisa_py multilaser/laser_controller_gui.py
