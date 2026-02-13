@@ -10,6 +10,8 @@ Author: Multi-Laser Box Project
 Date: 2025-12-08
 """
 
+import logging
+
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -78,6 +80,14 @@ class PowerDisplay(QWidget):
         self.power_watts_label.setStyleSheet("color: #7f8c8d;")
         layout.addWidget(self.power_watts_label)
 
+        # Raw (uncalibrated) info label — only shown for reference meter when calibrated
+        self.raw_label = QLabel("")
+        self.raw_label.setFont(QFont("Arial", 9))
+        self.raw_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.raw_label.setStyleSheet("color: #e67e22;")
+        self.raw_label.setVisible(False)
+        layout.addWidget(self.raw_label)
+
         # Device info
         self.device_label = QLabel("Not connected")
         self.device_label.setFont(QFont("Arial", 8))
@@ -98,6 +108,15 @@ class PowerDisplay(QWidget):
             self.power_label.setText("--- W")
             self.power_watts_label.setText("(--- W)")
 
+    def set_raw_info(self, raw_power_w: Optional[float]):
+        """Show the raw (uncalibrated) power reading below the main display"""
+        if raw_power_w is not None:
+            self.raw_label.setText(f"Raw: {format_power_auto_scale(raw_power_w)}")
+            self.raw_label.setVisible(True)
+        else:
+            self.raw_label.setText("")
+            self.raw_label.setVisible(False)
+
     def set_device_info(self, info: str):
         """Set the device information text"""
         self.device_label.setText(info)
@@ -110,6 +129,7 @@ class PowerMeterTab(QWidget):
         super().__init__(parent)
         self.controller = PowerMeterController()
         self.available_meters = []
+        self.frozen = False
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update_readings)
 
@@ -200,7 +220,6 @@ class PowerMeterTab(QWidget):
         self.wavelength_spin.setValue(1310)
         self.wavelength_spin.setSingleStep(1)
         self.wavelength_spin.setEnabled(False)
-        self.wavelength_spin.valueChanged.connect(self.apply_settings)
         settings_layout.addWidget(self.wavelength_spin)
 
         settings_layout.addSpacing(20)
@@ -212,8 +231,15 @@ class PowerMeterTab(QWidget):
         self.averaging_spin.setValue(1)
         self.averaging_spin.setSingleStep(1)
         self.averaging_spin.setEnabled(False)
-        self.averaging_spin.valueChanged.connect(self.apply_settings)
         settings_layout.addWidget(self.averaging_spin)
+
+        settings_layout.addSpacing(20)
+
+        # Apply settings button
+        self.apply_settings_btn = QPushButton("Apply Settings")
+        self.apply_settings_btn.setEnabled(False)
+        self.apply_settings_btn.clicked.connect(self.apply_settings)
+        settings_layout.addWidget(self.apply_settings_btn)
 
         settings_layout.addSpacing(20)
 
@@ -233,19 +259,60 @@ class PowerMeterTab(QWidget):
         settings_group.setLayout(settings_layout)
         main_layout.addWidget(settings_group)
 
+        # === Calibration Section ===
+        calibration_group = QGroupBox("Reference Calibration")
+        calibration_layout = QHBoxLayout()
+
+        calibration_layout.addWidget(QLabel("Calibration Factor:"))
+        self.calibration_spin = QDoubleSpinBox()
+        self.calibration_spin.setRange(0.001, 1000.0)
+        self.calibration_spin.setValue(1.0)
+        self.calibration_spin.setDecimals(6)
+        self.calibration_spin.setSingleStep(0.1)
+        self.calibration_spin.setEnabled(False)
+        self.calibration_spin.valueChanged.connect(self._on_calibration_changed)
+        calibration_layout.addWidget(self.calibration_spin)
+
+        calibration_layout.addSpacing(10)
+
+        self.calibrate_btn = QPushButton("Calibrate Now")
+        self.calibrate_btn.setEnabled(False)
+        self.calibrate_btn.setToolTip(
+            "Read both meters and compute calibration factor so that\n"
+            "corrected reference = target power"
+        )
+        self.calibrate_btn.clicked.connect(self.auto_calibrate)
+        calibration_layout.addWidget(self.calibrate_btn)
+
+        calibration_layout.addStretch()
+
+        calibration_group.setLayout(calibration_layout)
+        main_layout.addWidget(calibration_group)
+
         # === Power Readings Section ===
-        readings_layout = QHBoxLayout()
-        readings_layout.setSpacing(20)
+        readings_row = QHBoxLayout()
+        readings_row.setSpacing(20)
 
         # Reference power display
         self.ref_display = PowerDisplay("Reference Power")
-        readings_layout.addWidget(self.ref_display)
+        readings_row.addWidget(self.ref_display)
 
         # Target power display
         self.target_display = PowerDisplay("Target Power")
-        readings_layout.addWidget(self.target_display)
+        readings_row.addWidget(self.target_display)
 
-        main_layout.addLayout(readings_layout)
+        main_layout.addLayout(readings_row)
+
+        # === Freeze Button ===
+        freeze_row = QHBoxLayout()
+        freeze_row.addStretch()
+        self.freeze_btn = QPushButton("Freeze")
+        self.freeze_btn.setMinimumWidth(120)
+        self.freeze_btn.setEnabled(False)
+        self.freeze_btn.clicked.connect(self.toggle_freeze)
+        freeze_row.addWidget(self.freeze_btn)
+        freeze_row.addStretch()
+        main_layout.addLayout(freeze_row)
 
         # === Ratio Display ===
         ratio_group = QGroupBox("Power Ratio")
@@ -284,8 +351,9 @@ class PowerMeterTab(QWidget):
         """Scan for available power meters"""
         try:
             self.available_meters = self.controller.find_power_meters()
+            count = len(self.available_meters)
 
-            if len(self.available_meters) == 0:
+            if count == 0:
                 QMessageBox.warning(
                     self,
                     "No Devices Found",
@@ -296,19 +364,8 @@ class PowerMeterTab(QWidget):
                 self.status_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
                 self.connect_btn.setEnabled(False)
 
-            elif len(self.available_meters) == 1:
-                QMessageBox.warning(
-                    self,
-                    "Insufficient Devices",
-                    f"Found only 1 power meter.\n\n"
-                    "This application requires 2 power meters to be connected.",
-                )
-                self.status_label.setText("Found 1 power meter (need 2)")
-                self.status_label.setStyleSheet("color: #e67e22; font-weight: bold;")
-                self.connect_btn.setEnabled(False)
-
-            elif len(self.available_meters) == 2:
-                self.status_label.setText("Found 2 power meters - ready to connect")
+            elif count in [1, 2]:
+                self.status_label.setText(f"Found {count} power meter(s) - ready to connect")
                 self.status_label.setStyleSheet("color: #27ae60; font-weight: bold;")
                 self.connect_btn.setEnabled(True)
 
@@ -316,11 +373,11 @@ class PowerMeterTab(QWidget):
                 QMessageBox.warning(
                     self,
                     "Too Many Devices",
-                    f"Found {len(self.available_meters)} power meters.\n\n"
-                    "This application requires exactly 2 power meters.\n"
+                    f"Found {count} power meters.\n\n"
+                    "This application supports up to 2 power meters.\n"
                     "Please disconnect extra devices.",
                 )
-                self.status_label.setText(f"Found {len(self.available_meters)} power meters (need exactly 2)")
+                self.status_label.setText(f"Found {count} power meters (need 1 or 2)")
                 self.status_label.setStyleSheet("color: #e67e22; font-weight: bold;")
                 self.connect_btn.setEnabled(False)
 
@@ -341,26 +398,47 @@ class PowerMeterTab(QWidget):
         try:
             self.controller.connect_power_meters(self.available_meters)
 
-            # Populate role selection combo boxes
             meters = self.controller.get_power_meters()
+            num_meters = len(meters)
+
+            # Populate role selection combo boxes
+            self.ref_combo.blockSignals(True)
+            self.target_combo.blockSignals(True)
             self.ref_combo.clear()
             self.target_combo.clear()
+
+            # Add "None" option for single-meter mode
+            none_label = "— None —"
+            self.ref_combo.addItem(none_label, None)
+            self.target_combo.addItem(none_label, None)
 
             for i, pm in enumerate(meters):
                 label = f"Meter {i + 1}: {pm.get_short_name()}"
                 self.ref_combo.addItem(label, i)
                 self.target_combo.addItem(label, i)
 
-            # Set default assignment: Meter 0 = Reference, Meter 1 = Target
-            self.ref_combo.setCurrentIndex(0)
-            self.target_combo.setCurrentIndex(1)
+            if num_meters == 2:
+                # Default: Meter 0 = Reference, Meter 1 = Target
+                self.ref_combo.setCurrentIndex(1)      # index 1 = Meter 0
+                self.target_combo.setCurrentIndex(2)    # index 2 = Meter 1
+            else:
+                # Single meter: assign as Target by default
+                self.ref_combo.setCurrentIndex(0)       # None
+                self.target_combo.setCurrentIndex(1)    # Meter 0
+
+            self.ref_combo.blockSignals(False)
+            self.target_combo.blockSignals(False)
 
             # Update role assignment
             self.update_role_assignment()
 
             # Update device info in displays
-            self.ref_display.set_device_info(meters[0].device_info)
-            self.target_display.set_device_info(meters[1].device_info)
+            if num_meters == 2:
+                self.ref_display.set_device_info(meters[0].device_info)
+                self.target_display.set_device_info(meters[1].device_info)
+            else:
+                self.ref_display.set_device_info("Not assigned")
+                self.target_display.set_device_info(meters[0].device_info)
 
             # Enable controls
             self.ref_combo.setEnabled(True)
@@ -368,6 +446,12 @@ class PowerMeterTab(QWidget):
             self.wavelength_spin.setEnabled(True)
             self.averaging_spin.setEnabled(True)
             self.update_rate_spin.setEnabled(True)
+            self.apply_settings_btn.setEnabled(True)
+            self.freeze_btn.setEnabled(True)
+
+            # Enable calibration only with 2 meters
+            self.calibrate_btn.setEnabled(num_meters == 2)
+            self.calibration_spin.setEnabled(True)
 
             # Disable scan and update connect button
             self.scan_btn.setEnabled(False)
@@ -387,7 +471,7 @@ class PowerMeterTab(QWidget):
             """
             )
 
-            self.status_label.setText("Connected to 2 power meters")
+            self.status_label.setText(f"Connected to {num_meters} power meter(s)")
             self.status_label.setStyleSheet("color: #27ae60; font-weight: bold;")
 
             # Start updating readings
@@ -401,11 +485,18 @@ class PowerMeterTab(QWidget):
 
     def disconnect_meters(self):
         """Disconnect from the power meters"""
-        # Stop timer
+        # Stop timer and unfreeze
         self.update_timer.stop()
+        self.frozen = False
+        self.freeze_btn.setText("Freeze")
+        self.freeze_btn.setStyleSheet("")
 
         # Disconnect
         self.controller.disconnect_all()
+
+        # Reset calibration
+        self.controller.calibration_factor = 1.0
+        self.calibration_spin.setValue(1.0)
 
         # Reset UI
         self.ref_combo.clear()
@@ -415,11 +506,16 @@ class PowerMeterTab(QWidget):
         self.wavelength_spin.setEnabled(False)
         self.averaging_spin.setEnabled(False)
         self.update_rate_spin.setEnabled(False)
+        self.apply_settings_btn.setEnabled(False)
+        self.freeze_btn.setEnabled(False)
+        self.calibrate_btn.setEnabled(False)
+        self.calibration_spin.setEnabled(False)
 
         self.ref_display.update_power(None)
         self.target_display.update_power(None)
         self.ref_display.set_device_info("Not connected")
         self.target_display.set_device_info("Not connected")
+        self.ref_display.set_raw_info(None)
 
         self.ratio_label.setText("Target / Reference = ---")
         self.ratio_percent_label.setText("--- %")
@@ -456,34 +552,56 @@ class PowerMeterTab(QWidget):
         ref_index = self.ref_combo.currentData()
         target_index = self.target_combo.currentData()
 
-        if ref_index is None or target_index is None:
+        # Both None is invalid
+        if ref_index is None and target_index is None:
             return
 
-        if ref_index == target_index:
+        # Same meter for both roles is invalid
+        if ref_index is not None and target_index is not None and ref_index == target_index:
             QMessageBox.warning(
                 self,
                 "Invalid Assignment",
                 "Reference and Target must be different power meters!",
             )
-            # Reset to valid assignment
-            if ref_index == 0:
-                self.target_combo.setCurrentIndex(1)
-            else:
-                self.target_combo.setCurrentIndex(0)
-            return
+            # Reset: put the other meter in the target slot
+            self.target_combo.blockSignals(True)
+            other = 1 if ref_index == 0 else 0
+            # Find combo index for that meter index
+            for i in range(self.target_combo.count()):
+                if self.target_combo.itemData(i) == other:
+                    self.target_combo.setCurrentIndex(i)
+                    break
+            self.target_combo.blockSignals(False)
+            target_index = other
 
         try:
             self.controller.assign_roles(ref_index, target_index)
 
             # Update device info in displays
             meters = self.controller.get_power_meters()
-            self.ref_display.set_device_info(meters[ref_index].device_info)
-            self.target_display.set_device_info(meters[target_index].device_info)
+            if ref_index is not None:
+                self.ref_display.set_device_info(meters[ref_index].device_info)
+            else:
+                self.ref_display.set_device_info("Not assigned")
+
+            if target_index is not None:
+                self.target_display.set_device_info(meters[target_index].device_info)
+            else:
+                self.target_display.set_device_info("Not assigned")
+
+            # Enable calibrate button only when both roles are assigned
+            has_both = ref_index is not None and target_index is not None
+            self.calibrate_btn.setEnabled(has_both)
 
         except PowerMeterError as e:
             QMessageBox.critical(
                 self, "Assignment Error", f"Failed to assign roles:\n{str(e)}"
             )
+
+    def set_wavelength(self, wavelength_nm: int):
+        """Set the wavelength on the GUI and apply to connected meters"""
+        self.wavelength_spin.setValue(wavelength_nm)
+        self.apply_settings()
 
     def apply_settings(self):
         """Apply wavelength and averaging settings to all meters"""
@@ -508,17 +626,70 @@ class PowerMeterTab(QWidget):
         interval_ms = int(1000 / rate_hz)
         self.update_timer.setInterval(interval_ms)
 
+    def toggle_freeze(self):
+        """Toggle freeze/unfreeze of measurement display"""
+        if self.frozen:
+            # Unfreeze: restart timer
+            self.frozen = False
+            self.freeze_btn.setText("Freeze")
+            self.freeze_btn.setStyleSheet("")
+            self.update_timer_rate()
+            self.update_timer.start()
+        else:
+            # Freeze: stop timer, hold current values
+            self.frozen = True
+            self.update_timer.stop()
+            self.freeze_btn.setText("Unfreeze")
+            self.freeze_btn.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: #3498db;
+                    color: white;
+                    font-weight: bold;
+                    padding: 8px;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #2980b9;
+                }
+            """
+            )
+
+    def _on_calibration_changed(self, value: float):
+        """Handle manual calibration factor change"""
+        if value > 0:
+            self.controller.set_calibration_factor(value)
+
+    def auto_calibrate(self):
+        """Auto-calibrate using current meter readings"""
+        try:
+            factor = self.controller.calibrate_from_measurements()
+            self.calibration_spin.blockSignals(True)
+            self.calibration_spin.setValue(factor)
+            self.calibration_spin.blockSignals(False)
+        except PowerMeterError as e:
+            QMessageBox.critical(
+                self, "Calibration Error", f"Failed to calibrate:\n{str(e)}"
+            )
+
     def update_readings(self):
         """Update power readings from both meters"""
         try:
-            ref_power, target_power = self.controller.read_both_meters()
+            raw_ref, corrected_ref, target_power = self.controller.read_meters()
 
-            self.ref_display.update_power(ref_power)
+            # Show corrected reference as main display
+            self.ref_display.update_power(corrected_ref)
             self.target_display.update_power(target_power)
 
-            # Calculate and display ratio
-            if ref_power is not None and target_power is not None and ref_power > 0:
-                ratio = target_power / ref_power
+            # Show raw reference when calibration is active
+            if self.controller.calibration_factor != 1.0 and raw_ref is not None:
+                self.ref_display.set_raw_info(raw_ref)
+            else:
+                self.ref_display.set_raw_info(None)
+
+            # Calculate and display ratio using corrected reference
+            if corrected_ref is not None and target_power is not None and corrected_ref > 0:
+                ratio = target_power / corrected_ref
                 self.ratio_label.setText(f"Target / Reference = {ratio:.6f}")
                 self.ratio_percent_label.setText(f"({ratio * 100:.3f} %)")
             else:
@@ -527,8 +698,7 @@ class PowerMeterTab(QWidget):
 
         except Exception as e:
             # Don't pop up error dialogs during continuous reading
-            # Just log to console
-            print(f"Error reading power meters: {str(e)}")
+            logging.error(f"Error reading power meters: {str(e)}")
 
     def cleanup(self):
         """Clean up resources when closing"""

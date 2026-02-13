@@ -123,7 +123,7 @@ class PowerMeter:
             # Set power unit
             self.instrument.write(f"SENS:POW:UNIT {self._power_unit}")
             # Set averaging
-            self.instrument.write(f"SENS:AVER:{self._averaging}")
+            self.instrument.write(f"SENS:AVER:COUN {self._averaging}")
         except Exception as e:
             raise PowerMeterError(f"Failed to configure settings: {str(e)}")
 
@@ -155,7 +155,7 @@ class PowerMeter:
 
         try:
             self._averaging = samples
-            self.instrument.write(f"SENS:AVER:{samples}")
+            self.instrument.write(f"SENS:AVER:COUN {samples}")
         except Exception as e:
             raise PowerMeterError(f"Failed to set averaging: {str(e)}")
 
@@ -190,7 +190,7 @@ class PowerMeter:
 
 
 class PowerMeterController:
-    """Controller for managing two Thorlabs PM100USB power meters"""
+    """Controller for managing one or two Thorlabs PM100USB power meters"""
 
     def __init__(self):
         """Initialize the power meter controller"""
@@ -201,6 +201,7 @@ class PowerMeterController:
         self.power_meters: List[PowerMeter] = []
         self.reference_meter: Optional[PowerMeter] = None
         self.target_meter: Optional[PowerMeter] = None
+        self.calibration_factor: float = 1.0
 
         logging.basicConfig(level=logging.INFO)
 
@@ -235,10 +236,10 @@ class PowerMeterController:
         Connect to specified power meters
 
         Args:
-            resource_names: List of VISA resource names to connect to
+            resource_names: List of VISA resource names to connect to (1 or 2)
         """
-        if len(resource_names) != 2:
-            raise PowerMeterError("Exactly 2 power meters are required")
+        if len(resource_names) not in [1, 2]:
+            raise PowerMeterError("1 or 2 power meters are required")
 
         self.power_meters.clear()
 
@@ -259,50 +260,96 @@ class PowerMeterController:
             self.rm.close()
             self.rm = None
 
-    def assign_roles(self, reference_index: int, target_index: int):
+    def assign_roles(self, reference_index: Optional[int], target_index: Optional[int]):
         """
         Assign reference and target roles to power meters
 
         Args:
-            reference_index: Index of power meter to use as reference (0 or 1)
-            target_index: Index of power meter to use as target (0 or 1)
+            reference_index: Index of power meter to use as reference, or None
+            target_index: Index of power meter to use as target, or None
         """
-        if len(self.power_meters) != 2:
-            raise PowerMeterError("Must have 2 connected power meters")
+        if not self.power_meters:
+            raise PowerMeterError("No connected power meters")
 
-        if reference_index == target_index:
-            raise PowerMeterError("Reference and target must be different power meters")
-
-        if reference_index not in [0, 1] or target_index not in [0, 1]:
-            raise PowerMeterError("Index must be 0 or 1")
+        if reference_index is not None and target_index is not None:
+            if reference_index == target_index:
+                raise PowerMeterError("Reference and target must be different power meters")
 
         # Reset all roles
         for pm in self.power_meters:
             pm.set_role(PowerMeterRole.UNASSIGNED)
 
-        # Assign new roles
-        self.power_meters[reference_index].set_role(PowerMeterRole.REFERENCE)
-        self.power_meters[target_index].set_role(PowerMeterRole.TARGET)
+        self.reference_meter = None
+        self.target_meter = None
 
-        self.reference_meter = self.power_meters[reference_index]
-        self.target_meter = self.power_meters[target_index]
+        if reference_index is not None:
+            self.power_meters[reference_index].set_role(PowerMeterRole.REFERENCE)
+            self.reference_meter = self.power_meters[reference_index]
+            logging.info(f"Assigned Reference: {self.reference_meter.get_short_name()}")
 
-        logging.info(f"Assigned Reference: {self.reference_meter.get_short_name()}")
-        logging.info(f"Assigned Target: {self.target_meter.get_short_name()}")
+        if target_index is not None:
+            self.power_meters[target_index].set_role(PowerMeterRole.TARGET)
+            self.target_meter = self.power_meters[target_index]
+            logging.info(f"Assigned Target: {self.target_meter.get_short_name()}")
 
-    def read_both_meters(self) -> Tuple[Optional[float], Optional[float]]:
+    def set_calibration_factor(self, factor: float):
         """
-        Read power from both meters
+        Set the calibration factor for the reference meter.
+
+        The corrected reference reading = raw_reading * calibration_factor.
+        For a 90:10 fibre splitter where 10% goes to the reference meter,
+        the calibration factor would be ~10 so that the corrected reference
+        matches the target power.
+
+        Args:
+            factor: Calibration factor (default 1.0 = no correction)
+        """
+        if factor <= 0:
+            raise PowerMeterError("Calibration factor must be positive")
+        self.calibration_factor = factor
+        logging.info(f"Calibration factor set to {factor:.6f}")
+
+    def calibrate_from_measurements(self) -> float:
+        """
+        Auto-calibrate by reading both meters and computing the factor.
+
+        Sets calibration_factor = target_power / reference_power so that
+        corrected_reference ≈ target_power after calibration.
 
         Returns:
-            Tuple of (reference_power, target_power) in Watts
+            The computed calibration factor
+
+        Raises:
+            PowerMeterError: If both meters are not available or reference reads zero
         """
-        ref_power = None
+        raw_ref, _, target = self.read_meters()
+
+        if raw_ref is None or target is None:
+            raise PowerMeterError("Both meters must be connected to calibrate")
+        if raw_ref <= 0:
+            raise PowerMeterError("Reference power must be positive to calibrate")
+
+        factor = target / raw_ref
+        self.calibration_factor = factor
+        logging.info(f"Calibrated: factor = {factor:.6f} (target={target:.6e}, ref={raw_ref:.6e})")
+        return factor
+
+    def read_meters(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        """
+        Read power from both meters with calibration applied to reference.
+
+        Returns:
+            Tuple of (raw_reference_power, corrected_reference_power, target_power) in Watts.
+            corrected_reference = raw_reference * calibration_factor.
+        """
+        raw_ref = None
+        corrected_ref = None
         target_power = None
 
         if self.reference_meter and self.reference_meter.connected:
             try:
-                ref_power = self.reference_meter.read_power()
+                raw_ref = self.reference_meter.read_power()
+                corrected_ref = raw_ref * self.calibration_factor
             except PowerMeterError as e:
                 logging.error(f"Error reading reference meter: {str(e)}")
 
@@ -312,20 +359,30 @@ class PowerMeterController:
             except PowerMeterError as e:
                 logging.error(f"Error reading target meter: {str(e)}")
 
-        return ref_power, target_power
+        return raw_ref, corrected_ref, target_power
+
+    def read_both_meters(self) -> Tuple[Optional[float], Optional[float]]:
+        """
+        Read power from both meters (corrected reference, target).
+
+        Returns:
+            Tuple of (corrected_reference_power, target_power) in Watts
+        """
+        _, corrected_ref, target_power = self.read_meters()
+        return corrected_ref, target_power
 
     def calculate_ratio(self) -> Optional[float]:
         """
-        Calculate the ratio of target/reference power
+        Calculate the ratio of target/corrected_reference power
 
         Returns:
-            Ratio of target to reference power, or None if not available
+            Ratio of target to corrected reference power, or None if not available
         """
-        ref_power, target_power = self.read_both_meters()
+        corrected_ref, target_power = self.read_both_meters()
 
-        if ref_power is not None and target_power is not None:
-            if ref_power > 0:
-                return target_power / ref_power
+        if corrected_ref is not None and target_power is not None:
+            if corrected_ref > 0:
+                return target_power / corrected_ref
 
         return None
 
