@@ -21,13 +21,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Miniconda
-        uses: conda-incubator/setup-miniconda@v3
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          auto-update-conda: true
-          activate-environment: multilaser
-          environment-file: environment.yml
           python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install numpy pyserial PyQt6 pyvisa pyvisa-py psutil pyinstaller pyusb
 
       - name: Build Windows executable
         run: |
