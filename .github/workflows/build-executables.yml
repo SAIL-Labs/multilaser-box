@@ -39,12 +39,13 @@ jobs:
 
       - name: Build Windows executable
         run: |
-          pyinstaller --onefile --windowed --name=MultiLaserController --icon=figures/icon.ico --add-data="figures/icon.ico;figures" --hidden-import=pyvisa --hidden-import=pyvisa_py multilaser/laser_controller_gui.py
+          $version = (Get-Content VERSION -Raw).Trim()
+          pyinstaller --onefile --windowed --name="MultiLaserController-v$version" --icon=figures/icon.ico --add-data="figures/icon.ico;figures" --hidden-import=pyvisa --hidden-import=pyvisa_py multilaser/laser_controller_gui.py
 
       - name: Package Windows artifacts
         run: |
           mkdir -p release/windows
-          copy dist\MultiLaserController.exe release\windows\
+          copy dist\MultiLaserController-v*.exe release\windows\
           copy README.md release\windows\
           copy docs/multilaser_manual.md release\windows\
           xcopy /E /I laser_ttl_controller release\windows\laser_ttl_controller
@@ -62,6 +63,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for release notes
 
       - name: Download Windows artifact
         uses: actions/download-artifact@v4
@@ -78,21 +81,13 @@ jobs:
         with:
           files: |
             MultiLaserController-Windows.zip
+          generate_release_notes: true
           body: |
-            ## Multi-Laser Controller Release
-
-            Standalone executable for Windows.
-
-            ### Windows Installation
+            ## Installation
             1. Download `MultiLaserController-Windows.zip`
-            2. Extract the archive
-            3. Run `MultiLaserController.exe`
+            2. Extract and run the `.exe` file
 
-            ### Arduino Firmware
-            The `laser_ttl_controller` folder contains the Arduino firmware files.
-            Upload the appropriate `.ino` file to your Arduino board.
-
-            See `README.md` and `multilaser_manual.md` for detailed usage instructions.
+            ## Changes
           draft: false
           prerelease: false
         env:

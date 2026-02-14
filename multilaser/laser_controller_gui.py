@@ -11,6 +11,7 @@ Author: Based on MultiLaserController by Kok-Wei Bong
 Date: 2025-09-29
 """
 
+import subprocess
 import sys
 import time
 import webbrowser
@@ -48,8 +49,6 @@ except ImportError:
 from multilaser.updater import (
     UpdateCheckWorker,
     DownloadWorker,
-    apply_update,
-    get_current_exe_path,
 )
 
 
@@ -786,6 +785,12 @@ class LaserControlGUI(QMainWindow):
 
     def _start_download(self, info):
         """Download the update with a progress dialog."""
+        # Determine destination folder: next to current exe, or cwd for source
+        if getattr(sys, "frozen", False):
+            dest_dir = Path(sys.executable).parent
+        else:
+            dest_dir = Path.cwd()
+
         self._progress = QProgressDialog(
             f"Downloading v{info.latest_version}...",
             "Cancel",
@@ -797,7 +802,9 @@ class LaserControlGUI(QMainWindow):
         self._progress.setAutoClose(False)
         self._progress.setAutoReset(False)
 
-        self._download_worker = DownloadWorker(info.download_url, parent=self)
+        self._download_worker = DownloadWorker(
+            info.download_url, dest_dir, parent=self
+        )
         self._download_worker.progress.connect(self._on_download_progress)
         self._download_worker.download_complete.connect(self._on_download_complete)
         self._download_worker.error_occurred.connect(self._on_download_error)
@@ -819,34 +826,24 @@ class LaserControlGUI(QMainWindow):
             self._progress.setLabelText(f"Downloading... {downloaded // 1024} KB")
 
     def _on_download_complete(self, exe_path_str: str):
-        """Download finished — apply the update."""
+        """Download finished — show the new exe to the user."""
         self._progress.close()
 
         new_exe = Path(exe_path_str)
 
-        reply = QMessageBox.information(
+        QMessageBox.information(
             self,
-            "Update Ready",
-            "Update downloaded successfully.\n\n"
-            "The application will close and restart with the new version.\n"
-            "This takes a few seconds.",
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            "Update Downloaded",
+            f"New version downloaded:\n\n"
+            f"{new_exe.name}\n\n"
+            f"Close this application and run the new version.",
         )
 
-        if reply == QMessageBox.StandardButton.Ok:
-            # Disconnect from laser controller safely
-            if self.controller and self.controller.connected:
-                self.disconnect_from_controller()
-
-            # Clean up power meter
-            if self.power_meter_tab:
-                self.power_meter_tab.cleanup()
-
-            # Apply the update (spawns batch script)
-            apply_update(new_exe)
-
-            # Exit the application
-            QApplication.instance().quit()
+        # Open Explorer with the new exe selected
+        if sys.platform == "win32":
+            subprocess.Popen(["explorer", "/select,", str(new_exe)])
+        else:
+            webbrowser.open(str(new_exe.parent))
 
     def _on_download_error(self, error_msg: str):
         """Handle download failure."""

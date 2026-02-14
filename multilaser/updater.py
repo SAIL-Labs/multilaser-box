@@ -1,18 +1,17 @@
 """
 Auto-update module for Multi-Laser Controller.
 
-Checks GitHub releases for new versions and handles downloading,
-extracting, and applying updates for the PyInstaller-packaged exe.
+Checks GitHub releases for new versions and downloads the updated exe
+to the same folder as the current one. The user then runs the new
+versioned exe manually.
 
-Uses only stdlib (urllib, json, zipfile, tempfile, subprocess) plus
+Uses only stdlib (urllib, json, zipfile, tempfile, shutil) plus
 PyQt6 QThread for background operations.
 """
 
 import json
 import logging
-import os
-import subprocess
-import sys
+import shutil
 import tempfile
 import zipfile
 from pathlib import Path
@@ -25,7 +24,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 GITHUB_API_URL = "https://api.github.com/repos/SAIL-Labs/multilaser-box/releases/latest"
 ASSET_NAME = "MultiLaserController-Windows.zip"
-EXE_NAME = "MultiLaserController.exe"
+EXE_GLOB = "MultiLaserController-v*.exe"
 
 
 # ---------------------------------------------------------------------------
@@ -109,152 +108,68 @@ def check_for_update(current_version: str) -> Optional[UpdateInfo]:
 
 def download_update(
     download_url: str,
+    dest_dir: Path,
     progress_callback=None,
 ) -> Path:
-    """Download the update zip and extract the exe.
+    """Download the update zip and place the new exe in dest_dir.
 
     Args:
         download_url: URL to the release zip asset.
+        dest_dir: Directory to place the downloaded exe (alongside current exe).
         progress_callback: Optional callable(bytes_downloaded, total_bytes).
 
     Returns:
-        Path to the extracted exe file.
+        Path to the new exe in dest_dir.
     """
     req = urllib.request.Request(
         download_url,
         headers={"User-Agent": "MultiLaserController-Updater"},
     )
 
-    # Persistent temp directory (not auto-cleaned — batch script cleans it)
     temp_dir = Path(tempfile.mkdtemp(prefix="multilaser_update_"))
-    zip_path = temp_dir / "update.zip"
 
-    with urllib.request.urlopen(req, timeout=120) as response:
-        total_size = int(response.headers.get("Content-Length", 0))
-        downloaded = 0
-        chunk_size = 65536  # 64 KB
+    try:
+        zip_path = temp_dir / "update.zip"
 
-        with open(zip_path, "wb") as f:
-            while True:
-                chunk = response.read(chunk_size)
-                if not chunk:
-                    break
-                f.write(chunk)
-                downloaded += len(chunk)
-                if progress_callback:
-                    progress_callback(downloaded, total_size)
+        with urllib.request.urlopen(req, timeout=120) as response:
+            total_size = int(response.headers.get("Content-Length", 0))
+            downloaded = 0
+            chunk_size = 65536  # 64 KB
 
-    # Extract zip
-    extract_dir = temp_dir / "extracted"
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(extract_dir)
+            with open(zip_path, "wb") as f:
+                while True:
+                    chunk = response.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_callback:
+                        progress_callback(downloaded, total_size)
 
-    # Find the exe in extracted contents
-    exe_candidates = list(extract_dir.rglob(EXE_NAME))
-    if not exe_candidates:
-        raise FileNotFoundError(
-            f"{EXE_NAME} not found in downloaded archive"
-        )
+        # Extract zip
+        extract_dir = temp_dir / "extracted"
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(extract_dir)
 
-    return exe_candidates[0]
+        # Find the versioned exe in extracted contents
+        exe_candidates = list(extract_dir.rglob(EXE_GLOB))
+        if not exe_candidates:
+            raise FileNotFoundError(
+                f"No file matching {EXE_GLOB} found in downloaded archive"
+            )
 
+        src_exe = exe_candidates[0]
+        dest_exe = dest_dir / src_exe.name
 
-def get_current_exe_path() -> Optional[Path]:
-    """Return the path to the currently running exe, or None if not frozen."""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable)
-    return None
+        # Copy to destination folder
+        shutil.copy2(str(src_exe), str(dest_exe))
+        logging.info(f"Update downloaded to {dest_exe}")
 
+        return dest_exe
 
-def apply_update(new_exe_path: Path, current_exe_path: Path = None):
-    """Apply the update by writing and launching a replacement batch script.
-
-    The batch script waits for this process to exit, swaps the exe, relaunches
-    the app, then cleans up temp files and itself.
-
-    After calling this function, the caller should exit the application.
-
-    Args:
-        new_exe_path: Path to the newly downloaded exe.
-        current_exe_path: Path to the running exe. Auto-detected if None.
-
-    Raises:
-        RuntimeError: If not running as a frozen executable or not on Windows.
-    """
-    if sys.platform != "win32":
-        raise RuntimeError("Automatic update is only supported on Windows")
-
-    if current_exe_path is None:
-        current_exe_path = get_current_exe_path()
-
-    if current_exe_path is None:
-        raise RuntimeError("Cannot apply update: not running as a frozen executable")
-
-    current_exe = str(current_exe_path)
-    new_exe = str(new_exe_path)
-    bak_exe = current_exe + ".bak"
-    pid = os.getpid()
-
-    # The temp dir that contains downloaded files — clean it up too
-    temp_dir = str(new_exe_path.parent.parent)
-
-    batch_content = f'''@echo off
-REM Wait for the current process to exit
-:wait_loop
-tasklist /FI "PID eq {pid}" 2>NUL | find /I "{pid}" >NUL
-if not errorlevel 1 (
-    timeout /t 1 /nobreak >nul
-    goto wait_loop
-)
-
-REM Small safety delay
-timeout /t 1 /nobreak >nul
-
-REM Remove old backup if exists
-if exist "{bak_exe}" del /f "{bak_exe}"
-
-REM Rename current exe to .bak
-move /y "{current_exe}" "{bak_exe}"
-if errorlevel 1 (
-    echo ERROR: Failed to rename current executable
-    pause
-    exit /b 1
-)
-
-REM Move new exe into place
-move /y "{new_exe}" "{current_exe}"
-if errorlevel 1 (
-    echo ERROR: Failed to move new executable. Restoring backup.
-    move /y "{bak_exe}" "{current_exe}"
-    pause
-    exit /b 1
-)
-
-REM Relaunch the application
-start "" "{current_exe}"
-
-REM Clean up
-timeout /t 3 /nobreak >nul
-del /f "{bak_exe}" 2>nul
-rmdir /s /q "{temp_dir}" 2>nul
-
-REM Delete this batch script itself
-del /f "%~f0"
-'''
-
-    batch_path = Path(temp_dir) / "update.bat"
-    with open(batch_path, "w") as f:
-        f.write(batch_content)
-
-    logging.info(f"Launching update script: {batch_path}")
-
-    # Launch the batch script as a detached process
-    subprocess.Popen(
-        [str(batch_path)],
-        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-        close_fds=True,
-        shell=True,
-    )
+    finally:
+        # Clean up temp directory
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -288,17 +203,19 @@ class DownloadWorker(QThread):
     """Background thread to download an update."""
 
     progress = pyqtSignal(int, int)        # (bytes_downloaded, total_bytes)
-    download_complete = pyqtSignal(str)    # emits path to extracted exe
+    download_complete = pyqtSignal(str)    # emits path to new exe
     error_occurred = pyqtSignal(str)       # emits error message
 
-    def __init__(self, download_url: str, parent=None):
+    def __init__(self, download_url: str, dest_dir: Path, parent=None):
         super().__init__(parent)
         self.download_url = download_url
+        self.dest_dir = dest_dir
 
     def run(self):
         try:
             exe_path = download_update(
                 self.download_url,
+                self.dest_dir,
                 progress_callback=lambda dl, total: self.progress.emit(dl, total),
             )
             self.download_complete.emit(str(exe_path))
