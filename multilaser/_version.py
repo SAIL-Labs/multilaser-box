@@ -18,7 +18,7 @@ try:
     if version_file.exists():
         __version__ = version_file.read_text().strip()
     else:
-        __version__ = "0.5.0"
+        __version__ = "0.0.0"
 except Exception:
     # Fallback if VERSION file cannot be read
-    __version__ = "0.5.0"
+    __version__ = "0.0.0"

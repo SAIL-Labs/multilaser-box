@@ -29,7 +29,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install numpy pyserial PyQt6 pyvisa pyvisa-py psutil pyinstaller pyusb
+          pip install numpy pyserial PyQt6 pyvisa pyvisa-py psutil pyinstaller pyusb certifi
 
       - name: Set version for build
         run: |

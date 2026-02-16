@@ -12,6 +12,7 @@ PyQt6 QThread for background operations.
 import json
 import logging
 import shutil
+import ssl
 import tempfile
 import zipfile
 from pathlib import Path
@@ -23,6 +24,26 @@ import urllib.error
 from PyQt6.QtCore import QThread, pyqtSignal
 
 GITHUB_API_URL = "https://api.github.com/repos/SAIL-Labs/multilaser-box/releases/latest"
+
+
+def _create_ssl_context() -> ssl.SSLContext:
+    """Create an SSL context, falling back to certifi if system certs fail."""
+    ctx = ssl.create_default_context()
+    try:
+        if ctx.get_ca_certs():
+            return ctx
+    except Exception:
+        pass
+    # Fallback: use certifi's bundled CA certificates
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        pass
+    return ssl.create_default_context()
+
+
+_ssl_context = _create_ssl_context()
 ASSET_NAME = "MultiLaserController-Windows.zip"
 EXE_GLOB = "MultiLaserController-v*.exe"
 
@@ -77,7 +98,7 @@ def check_for_update(current_version: str) -> Optional[UpdateInfo]:
         },
     )
 
-    with urllib.request.urlopen(req, timeout=10) as response:
+    with urllib.request.urlopen(req, timeout=10, context=_ssl_context) as response:
         data = json.loads(response.read().decode("utf-8"))
 
     tag_name = data.get("tag_name", "")
@@ -131,7 +152,7 @@ def download_update(
     try:
         zip_path = temp_dir / "update.zip"
 
-        with urllib.request.urlopen(req, timeout=120) as response:
+        with urllib.request.urlopen(req, timeout=120, context=_ssl_context) as response:
             total_size = int(response.headers.get("Content-Length", 0))
             downloaded = 0
             chunk_size = 65536  # 64 KB
