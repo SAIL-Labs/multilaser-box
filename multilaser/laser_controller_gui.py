@@ -490,6 +490,10 @@ class LaserControlGUI(QMainWindow):
         # Reset last toggled laser tracking
         self.last_toggled_laser = None
 
+        # Reset power meter calibration/wavelength (no active laser)
+        if self.power_meter_tab:
+            self.power_meter_tab.set_calibration_factor(1.0, laser_number=None)
+
         # Enable connection settings
         self.port_combo.setEnabled(True)
         self.baud_combo.setEnabled(True)
