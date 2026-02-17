@@ -132,6 +132,7 @@ class PowerMeterTab(QWidget):
         self.available_meters = []
         self.frozen = False
         self.active_laser_number = None
+        self._updating_roles = False  # Flag to prevent signal loops
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update_readings)
 
@@ -197,7 +198,7 @@ class PowerMeterTab(QWidget):
         role_layout.addWidget(QLabel("Reference Meter:"))
         self.ref_combo = QComboBox()
         self.ref_combo.setEnabled(False)
-        self.ref_combo.currentIndexChanged.connect(self.update_role_assignment)
+        # Connect signal later to avoid loops during initialization
         role_layout.addWidget(self.ref_combo)
 
         role_layout.addSpacing(20)
@@ -205,7 +206,7 @@ class PowerMeterTab(QWidget):
         role_layout.addWidget(QLabel("Target Meter:"))
         self.target_combo = QComboBox()
         self.target_combo.setEnabled(False)
-        self.target_combo.currentIndexChanged.connect(self.update_role_assignment)
+        # Connect signal later to avoid loops during initialization
         role_layout.addWidget(self.target_combo)
 
         role_layout.addStretch()
@@ -354,6 +355,10 @@ class PowerMeterTab(QWidget):
         main_layout.addStretch()
 
         self.setLayout(main_layout)
+
+        # Connect role combo signals after UI initialization to avoid loops
+        self.ref_combo.currentIndexChanged.connect(self.update_role_assignment)
+        self.target_combo.currentIndexChanged.connect(self.update_role_assignment)
 
     def scan_power_meters(self):
         """Scan for available power meters"""
@@ -577,54 +582,60 @@ class PowerMeterTab(QWidget):
         if not self.controller.get_power_meters():
             return
 
-        ref_index = self.ref_combo.currentData()
-        target_index = self.target_combo.currentData()
-
-        # Both None is invalid
-        if ref_index is None and target_index is None:
+        # Prevent signal loops
+        if self._updating_roles:
             return
-
-        # Same meter for both roles is invalid
-        if ref_index is not None and target_index is not None and ref_index == target_index:
-            QMessageBox.warning(
-                self,
-                "Invalid Assignment",
-                "Reference and Target must be different power meters!",
-            )
-            # Reset: put the other meter in the target slot
-            self.target_combo.blockSignals(True)
-            other = 1 if ref_index == 0 else 0
-            # Find combo index for that meter index
-            for i in range(self.target_combo.count()):
-                if self.target_combo.itemData(i) == other:
-                    self.target_combo.setCurrentIndex(i)
-                    break
-            self.target_combo.blockSignals(False)
-            target_index = other
+        self._updating_roles = True
 
         try:
-            self.controller.assign_roles(ref_index, target_index)
+            ref_index = self.ref_combo.currentData()
+            target_index = self.target_combo.currentData()
 
-            # Update device info in displays
-            meters = self.controller.get_power_meters()
-            if ref_index is not None:
-                self.ref_display.set_device_info(meters[ref_index].device_info)
-            else:
-                self.ref_display.set_device_info("Not assigned")
+            # Both None is invalid
+            if ref_index is None and target_index is None:
+                return
 
-            if target_index is not None:
-                self.target_display.set_device_info(meters[target_index].device_info)
-            else:
-                self.target_display.set_device_info("Not assigned")
+            # Same meter for both roles is invalid
+            if ref_index is not None and target_index is not None and ref_index == target_index:
+                QMessageBox.warning(
+                    self,
+                    "Invalid Assignment",
+                    "Reference and Target must be different power meters!",
+                )
+                # Reset: put the other meter in the target slot
+                other = 1 if ref_index == 0 else 0
+                # Find combo index for that meter index
+                for i in range(self.target_combo.count()):
+                    if self.target_combo.itemData(i) == other:
+                        self.target_combo.setCurrentIndex(i)
+                        break
+                target_index = other
 
-            # Enable calibrate button only when both roles are assigned
-            has_both = ref_index is not None and target_index is not None
-            self.calibrate_btn.setEnabled(has_both)
+            try:
+                self.controller.assign_roles(ref_index, target_index)
 
-        except PowerMeterError as e:
-            QMessageBox.critical(
-                self, "Assignment Error", f"Failed to assign roles:\n{str(e)}"
-            )
+                # Update device info in displays
+                meters = self.controller.get_power_meters()
+                if ref_index is not None:
+                    self.ref_display.set_device_info(meters[ref_index].device_info)
+                else:
+                    self.ref_display.set_device_info("Not assigned")
+
+                if target_index is not None:
+                    self.target_display.set_device_info(meters[target_index].device_info)
+                else:
+                    self.target_display.set_device_info("Not assigned")
+
+                # Enable calibrate button only when both roles are assigned
+                has_both = ref_index is not None and target_index is not None
+                self.calibrate_btn.setEnabled(has_both)
+
+            except PowerMeterError as e:
+                QMessageBox.critical(
+                    self, "Assignment Error", f"Failed to assign roles:\n{str(e)}"
+                )
+        finally:
+            self._updating_roles = False
 
     def set_calibration_factor(self, factor: float, laser_number: int = None):
         """Set the calibration factor for the given laser.
