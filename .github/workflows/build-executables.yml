@@ -31,16 +31,25 @@ jobs:
         run: |
           pip install numpy pyserial PyQt6 pyvisa pyvisa-py psutil pyinstaller pyusb certifi
 
-      - name: Set version for build
+      - name: Set version for build from git tag
         run: |
-          $version = (Get-Content VERSION -Raw).Trim()
+          # Extract version from tag (refs/tags/v0.6.6 -> 0.6.6)
+          # For manual dispatch, fall back to VERSION file or 'dev'
+          if ("${{ github.ref_name }}" -match '^v') {
+            $version = "${{ github.ref_name }}".TrimStart('v')
+          } elseif (Test-Path VERSION) {
+            $version = (Get-Content VERSION -Raw).Trim()
+          } else {
+            $version = "${{ github.event.inputs.version }}"
+            if (-not $version) { $version = "dev" }
+          }
           Set-Content -Path multilaser/_version.py -Value "__version__ = `"$version`""
           Write-Host "Building version: $version"
+          echo "VERSION=$version" >> $env:GITHUB_ENV
 
       - name: Build Windows executable
         run: |
-          $version = (Get-Content VERSION -Raw).Trim()
-          pyinstaller --onefile --windowed --name="MultiLaserController-v$version" --icon=figures/icon.ico --add-data="figures/icon.ico;figures" --hidden-import=pyvisa --hidden-import=pyvisa_py multilaser/laser_controller_gui.py
+          pyinstaller --onefile --windowed --name="MultiLaserController-v$env:VERSION" --icon=figures/icon.ico --add-data="figures/icon.ico;figures" --hidden-import=pyvisa --hidden-import=pyvisa_py multilaser/laser_controller_gui.py
 
       - name: Package Windows artifacts
         run: |
