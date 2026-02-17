@@ -131,6 +131,7 @@ def download_update(
     download_url: str,
     dest_dir: Path,
     progress_callback=None,
+    cancel_check=None,
 ) -> Path:
     """Download the update zip and place the new exe in dest_dir.
 
@@ -138,9 +139,13 @@ def download_update(
         download_url: URL to the release zip asset.
         dest_dir: Directory to place the downloaded exe (alongside current exe).
         progress_callback: Optional callable(bytes_downloaded, total_bytes).
+        cancel_check: Optional callable() -> bool that returns True if cancelled.
 
     Returns:
         Path to the new exe in dest_dir.
+
+    Raises:
+        Exception: If download is cancelled.
     """
     req = urllib.request.Request(
         download_url,
@@ -159,6 +164,8 @@ def download_update(
 
             with open(zip_path, "wb") as f:
                 while True:
+                    if cancel_check and cancel_check():
+                        raise Exception("Download cancelled by user")
                     chunk = response.read(chunk_size)
                     if not chunk:
                         break
@@ -231,15 +238,23 @@ class DownloadWorker(QThread):
         super().__init__(parent)
         self.download_url = download_url
         self.dest_dir = dest_dir
+        self._cancelled = False
+
+    def cancel(self):
+        """Request cancellation of the download"""
+        self._cancelled = True
 
     def run(self):
         try:
             exe_path = download_update(
                 self.download_url,
                 self.dest_dir,
-                progress_callback=lambda dl, total: self.progress.emit(dl, total),
+                progress_callback=lambda dl, total: self.progress.emit(dl, total) if not self._cancelled else None,
+                cancel_check=lambda: self._cancelled,
             )
-            self.download_complete.emit(str(exe_path))
+            if not self._cancelled:
+                self.download_complete.emit(str(exe_path))
         except Exception as e:
-            logging.error(f"Update download failed: {e}")
-            self.error_occurred.emit(str(e))
+            if not self._cancelled:
+                logging.error(f"Update download failed: {e}")
+                self.error_occurred.emit(str(e))

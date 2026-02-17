@@ -845,7 +845,7 @@ class LaserControlGUI(QMainWindow):
         self._download_worker.error_occurred.connect(self._on_download_error)
         self._download_worker.finished.connect(self._download_worker.deleteLater)
 
-        self._progress.canceled.connect(self._download_worker.terminate)
+        self._progress.canceled.connect(self._download_worker.cancel)
 
         self._download_worker.start()
 
