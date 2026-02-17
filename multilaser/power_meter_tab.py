@@ -677,17 +677,23 @@ class PowerMeterTab(QWidget):
         was_running = self.update_timer.isActive()
         self.update_timer.stop()
 
+        error = None
         try:
             for pm in self.controller.get_power_meters():
                 pm.set_wavelength(wavelength)
                 pm.set_averaging(averaging)
         except PowerMeterError as e:
-            QMessageBox.critical(
-                self, "Settings Error", f"Failed to apply settings:\n{str(e)}"
-            )
+            error = e
         finally:
+            # Always restart timer before showing error dialog
             if was_running:
                 self.update_timer.start()
+
+        # Show error dialog after timer is restarted
+        if error:
+            QMessageBox.critical(
+                self, "Settings Error", f"Failed to apply settings:\n{str(error)}"
+            )
 
     def update_timer_rate(self):
         """Update the timer interval based on the update rate"""
