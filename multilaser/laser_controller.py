@@ -113,6 +113,10 @@ class MultiLaserController:
             self.serial_conn.reset_input_buffer()
             self.serial_conn.reset_output_buffer()
 
+            # Reset all laser states to OFF (in case Arduino was power-cycled)
+            for i in range(1, self.num_lasers + 1):
+                self.laser_states[i] = LaserState.OFF
+
             # Test connection
             if self.serial_conn.is_open:
                 self.connected = True

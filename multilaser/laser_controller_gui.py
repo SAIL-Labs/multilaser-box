@@ -121,6 +121,9 @@ class LaserControlGUI(QMainWindow):
         # Emergency stop state
         self.emergency_stop_active = False
 
+        # Track last toggled laser for wavelength sync
+        self.last_toggled_laser = None
+
         # Update check state
         self._pending_update = None
         self._update_manual = False
@@ -484,6 +487,9 @@ class LaserControlGUI(QMainWindow):
         # Reset emergency stop state
         self.emergency_stop_active = False
 
+        # Reset last toggled laser tracking
+        self.last_toggled_laser = None
+
         # Enable connection settings
         self.port_combo.setEnabled(True)
         self.baud_combo.setEnabled(True)
@@ -513,6 +519,8 @@ class LaserControlGUI(QMainWindow):
             # self.statusBar().showMessage(f"Laser {laser_number} ON (all others OFF)")
 
             self.controller.toggle_laser(laser_number)
+            # Track which laser was just toggled for wavelength sync
+            self.last_toggled_laser = laser_number
             self.update_led_states()
             self.sync_power_meter_wavelength()
             self.sync_power_meter_calibration()
@@ -534,6 +542,7 @@ class LaserControlGUI(QMainWindow):
 
         try:
             self.controller.turn_off_all()
+            self.last_toggled_laser = None  # Reset since no laser is on
             self.update_led_states()
             self.sync_power_meter_calibration()
             self.statusBar().showMessage("All lasers turned OFF")
@@ -632,7 +641,15 @@ class LaserControlGUI(QMainWindow):
             return
 
         try:
-            # Find which laser is ON
+            # Use the last toggled laser if available and ON
+            if self.last_toggled_laser is not None:
+                if self.controller.get_laser_state(self.last_toggled_laser) == LaserState.ON:
+                    wavelength = self.controller.get_laser_wavelength(self.last_toggled_laser)
+                    if wavelength:
+                        self.power_meter_tab.set_wavelength(wavelength)
+                    return
+
+            # Fallback: find any laser that is ON
             for i in range(1, self.controller.num_lasers + 1):
                 if self.controller.get_laser_state(i) == LaserState.ON:
                     wavelength = self.controller.get_laser_wavelength(i)
@@ -648,7 +665,16 @@ class LaserControlGUI(QMainWindow):
             return
 
         try:
-            # Find which laser is ON and load its saved calibration factor
+            # Use the last toggled laser if available and ON
+            if self.last_toggled_laser is not None:
+                if self.controller.get_laser_state(self.last_toggled_laser) == LaserState.ON:
+                    saved_cal = self.settings.value(
+                        f"laser/calibration_factor_{self.last_toggled_laser}", defaultValue=1.0, type=float
+                    )
+                    self.power_meter_tab.set_calibration_factor(saved_cal, laser_number=self.last_toggled_laser)
+                    return
+
+            # Fallback: find any laser that is ON and load its saved calibration factor
             for i in range(1, self.controller.num_lasers + 1):
                 if self.controller.get_laser_state(i) == LaserState.ON:
                     saved_cal = self.settings.value(
