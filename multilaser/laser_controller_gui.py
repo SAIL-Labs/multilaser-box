@@ -130,6 +130,7 @@ class LaserControlGUI(QMainWindow):
         # Update check state
         self._pending_update = None
         self._update_manual = False
+        self._update_worker = None
 
         self.init_ui()
         self.populate_com_ports()
@@ -764,6 +765,14 @@ class LaserControlGUI(QMainWindow):
             manual: If True, show errors and 'up to date' messages.
                     If False (startup), be completely silent unless an update is found.
         """
+        # Guard against concurrent update checks
+        if self._update_worker is not None and self._update_worker.isRunning():
+            if manual:
+                QMessageBox.information(
+                    self, "Update Check", "An update check is already in progress."
+                )
+            return
+
         self._update_manual = manual
         self._pending_update = None
         self._update_worker = UpdateCheckWorker(__version__, parent=self)
