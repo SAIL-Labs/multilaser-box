@@ -662,6 +662,10 @@ class PowerMeterTab(QWidget):
         wavelength = self.wavelength_spin.value()
         averaging = self.averaging_spin.value()
 
+        # Pause readings while we write settings to avoid VISA I/O conflicts
+        was_running = self.update_timer.isActive()
+        self.update_timer.stop()
+
         try:
             for pm in self.controller.get_power_meters():
                 pm.set_wavelength(wavelength)
@@ -670,6 +674,9 @@ class PowerMeterTab(QWidget):
             QMessageBox.critical(
                 self, "Settings Error", f"Failed to apply settings:\n{str(e)}"
             )
+        finally:
+            if was_running:
+                self.update_timer.start()
 
     def update_timer_rate(self):
         """Update the timer interval based on the update rate"""

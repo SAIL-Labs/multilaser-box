@@ -628,6 +628,8 @@ class LaserControlGUI(QMainWindow):
             return
         if not self.controller.use_scpi:
             return
+        if not self.power_meter_tab.controller.get_power_meters():
+            return
 
         try:
             # Find which laser is ON
