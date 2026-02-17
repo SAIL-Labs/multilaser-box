@@ -49,8 +49,10 @@ def format_power_auto_scale(power_watts: float) -> str:
 
 try:
     import pyvisa
+    PYVISA_AVAILABLE = True
 except ImportError:
     pyvisa = None
+    PYVISA_AVAILABLE = False
 
 
 class PowerMeterRole(Enum):

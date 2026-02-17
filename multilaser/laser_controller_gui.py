@@ -41,10 +41,13 @@ from multilaser._version import __version__
 # Import the PowerMeterTab
 try:
     from multilaser.power_meter_tab import PowerMeterTab
-    POWER_METER_AVAILABLE = True
-except ImportError:
+    from multilaser.power_meter_controller import PYVISA_AVAILABLE
+    POWER_METER_AVAILABLE = PYVISA_AVAILABLE
+    if not PYVISA_AVAILABLE:
+        print("Warning: PyVISA not available. Power meter tab will not be shown. Install with: pip install pyvisa pyvisa-py")
+except ImportError as e:
     POWER_METER_AVAILABLE = False
-    print("Warning: Power meter tab not available. Install pyvisa and pyvisa-py to enable.")
+    print(f"Warning: Power meter tab not available. Install pyvisa and pyvisa-py to enable. ({e})")
 
 from multilaser.updater import (
     UpdateCheckWorker,
