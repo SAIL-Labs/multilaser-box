@@ -27,6 +27,14 @@ pip install -e ".[powermeter]"
 
 If these dependencies are not installed, the application will still work but the Power Meters tab will not be available.
 
+For logging measurements to Excel, openpyxl is also required (included in the powermeter extras):
+
+```bash
+pip install openpyxl
+```
+
+Without openpyxl, measurement logging still works but only in CSV format.
+
 ## Features
 
 ### Dual Power Meter Monitoring
@@ -54,6 +62,18 @@ If these dependencies are not installed, the application will still work but the
 - Large, easy-to-read display with high-contrast colors
 - Device information displayed for each meter
 - Status indicators for connection state
+
+### Measurement Logging
+- Log measurements to Excel (.xlsx) or CSV (.csv) files
+- Excel logs use the lantern throughput worksheet layout: each logged
+  measurement adds a row with Trial, Port, injection power (corrected
+  reference) and lantern output power (target); throughput, loss and
+  per-port statistics are computed by built-in formulas
+- CSV logs include a timestamp, wavelength, and throughput/loss computed
+  at log time
+- Trial numbers auto-increment; the port number is set in the GUI
+- Append to an existing log file to continue a measurement session
+- Works with Freeze: freeze the display, then log the held readings
 
 ## Usage Instructions
 
@@ -101,7 +121,24 @@ Click on the "Power Meters" tab in the main application window.
 - Ratio displayed at the bottom (Target / Reference)
 - All readings update automatically at the configured rate
 
-### 9. Disconnect
+### 9. Log Measurements (Optional)
+1. Click "New Log File…" and choose where to save the log
+   - **Excel Workbook (.xlsx)**: generated with the lantern throughput
+     worksheet layout, including formulas for throughput, loss and per-port
+     statistics; the sheet is named after the current wavelength
+     (e.g. `wave_1550`)
+   - **CSV File (.csv)**: plain-text log with computed throughput and loss
+2. Or click "Append to Existing…" to continue an earlier log file
+3. Set the **Port** number for the lantern port being measured
+4. Click "Log Measurement" to record the current readings
+   - Injection power = corrected reference power
+   - Lantern output power = target power
+   - The trial number auto-increments
+5. Optionally use "Freeze" first to hold a reading, then log it
+6. Keep the log file closed in Excel while logging — the file is written on
+   every logged measurement
+
+### 10. Disconnect
 1. Click the "Disconnect" button when finished
 2. Meters will be safely disconnected
 3. Click "Scan for Power Meters" to start a new session

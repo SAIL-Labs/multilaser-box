@@ -47,6 +47,7 @@ setup(
         "powermeter": [
             "pyvisa>=1.11.0",
             "pyvisa-py>=0.5.0",
+            "openpyxl>=3.0",  # Excel measurement logging
         ],
     },
     entry_points={

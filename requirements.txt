@@ -11,5 +11,8 @@ PyQt6>=6.0
 # pyvisa>=1.11.0
 # pyvisa-py>=0.5.0
 
+# Optional: Excel measurement logging (CSV logging works without it)
+# openpyxl>=3.0
+
 # Development dependencies (optional)
 # pyinstaller  # For building standalone executables

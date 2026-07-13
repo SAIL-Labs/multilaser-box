@@ -11,6 +11,8 @@ Date: 2025-12-08
 """
 
 import logging
+from datetime import datetime
+from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QWidget,
@@ -23,6 +25,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QSpinBox,
     QDoubleSpinBox,
+    QFileDialog,
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings
 from PyQt6.QtGui import QFont
@@ -33,6 +36,11 @@ from multilaser.power_meter_controller import (
     PowerMeterError,
     PowerMeterRole,
     format_power_auto_scale,
+)
+from multilaser.measurement_logger import (
+    MeasurementLogger,
+    MeasurementLogError,
+    OPENPYXL_AVAILABLE,
 )
 
 
@@ -133,6 +141,9 @@ class PowerMeterTab(QWidget):
         self.frozen = False
         self.active_laser_number = None
         self._updating_roles = False  # Flag to prevent signal loops
+        self.measurement_log: Optional[MeasurementLogger] = None
+        self._last_corrected_ref: Optional[float] = None
+        self._last_target_power: Optional[float] = None
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update_readings)
 
@@ -352,6 +363,66 @@ class PowerMeterTab(QWidget):
         ratio_group.setLayout(ratio_layout)
         main_layout.addWidget(ratio_group)
 
+        # === Measurement Logging Section ===
+        logging_group = QGroupBox("Measurement Logging")
+        logging_layout = QVBoxLayout()
+
+        # Log file selection row
+        file_row = QHBoxLayout()
+
+        self.new_log_btn = QPushButton("New Log File…")
+        self.new_log_btn.setToolTip(
+            "Create a new log file.\n"
+            "Excel logs are created from the throughput template\n"
+            "(Trial / Port / injection power / lantern output power)."
+        )
+        self.new_log_btn.clicked.connect(self.new_log_file)
+        file_row.addWidget(self.new_log_btn)
+
+        self.open_log_btn = QPushButton("Append to Existing…")
+        self.open_log_btn.setToolTip("Continue logging into an existing .xlsx or .csv file")
+        self.open_log_btn.clicked.connect(self.open_log_file)
+        file_row.addWidget(self.open_log_btn)
+
+        self.log_file_label = QLabel("No log file selected")
+        self.log_file_label.setStyleSheet("color: #7f8c8d; font-style: italic;")
+        file_row.addWidget(self.log_file_label)
+
+        file_row.addStretch()
+        logging_layout.addLayout(file_row)
+
+        # Log measurement row
+        log_row = QHBoxLayout()
+
+        log_row.addWidget(QLabel("Port:"))
+        self.port_spin = QSpinBox()
+        self.port_spin.setRange(1, 99)
+        self.port_spin.setValue(1)
+        self.port_spin.setToolTip("Lantern port number recorded with each measurement")
+        log_row.addWidget(self.port_spin)
+
+        log_row.addSpacing(20)
+
+        self.log_btn = QPushButton("Log Measurement")
+        self.log_btn.setMinimumWidth(150)
+        self.log_btn.setEnabled(False)
+        self.log_btn.setToolTip(
+            "Record the current readings to the log file:\n"
+            "injection power = corrected reference, output power = target"
+        )
+        self.log_btn.clicked.connect(self.log_measurement)
+        log_row.addWidget(self.log_btn)
+
+        self.log_status_label = QLabel("")
+        self.log_status_label.setStyleSheet("color: #27ae60;")
+        log_row.addWidget(self.log_status_label)
+
+        log_row.addStretch()
+        logging_layout.addLayout(log_row)
+
+        logging_group.setLayout(logging_layout)
+        main_layout.addWidget(logging_group)
+
         main_layout.addStretch()
 
         self.setLayout(main_layout)
@@ -506,6 +577,8 @@ class PowerMeterTab(QWidget):
             self.status_label.setText(f"Connected to {num_meters} power meter(s)")
             self.status_label.setStyleSheet("color: #27ae60; font-weight: bold;")
 
+            self._update_log_controls()
+
             # Start updating readings
             self.update_timer_rate()
             self.update_timer.start()
@@ -549,6 +622,10 @@ class PowerMeterTab(QWidget):
         self.ref_display.set_device_info("Not connected")
         self.target_display.set_device_info("Not connected")
         self.ref_display.set_raw_info(None)
+
+        self._last_corrected_ref = None
+        self._last_target_power = None
+        self._update_log_controls()
 
         self.ratio_label.setText("Target / Reference = ---")
         self.ratio_percent_label.setText("--- %")
@@ -767,6 +844,11 @@ class PowerMeterTab(QWidget):
         try:
             raw_ref, corrected_ref, target_power = self.controller.read_meters()
 
+            # Remember latest readings for measurement logging
+            # (frozen display holds these values since the timer is stopped)
+            self._last_corrected_ref = corrected_ref
+            self._last_target_power = target_power
+
             # Show corrected reference as main display
             self.ref_display.update_power(corrected_ref)
             self.target_display.update_power(target_power)
@@ -790,6 +872,125 @@ class PowerMeterTab(QWidget):
             # Don't pop up error dialogs during continuous reading
             logging.error(f"Error reading power meters: {str(e)}")
 
+    def _log_file_filters(self) -> str:
+        """File dialog filters for log files (Excel only when openpyxl available)"""
+        if OPENPYXL_AVAILABLE:
+            return "Excel Workbook (*.xlsx);;CSV File (*.csv)"
+        return "CSV File (*.csv)"
+
+    def _log_start_dir(self) -> str:
+        """Initial directory for log file dialogs"""
+        if self.measurement_log is not None:
+            return str(self.measurement_log.file_path.parent)
+        return self.settings.value(
+            "power_meter/log_dir", defaultValue=str(Path.home()), type=str
+        )
+
+    def new_log_file(self):
+        """Create a new measurement log file (Excel from template, or CSV)"""
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "New Measurement Log",
+            self._log_start_dir(),
+            self._log_file_filters(),
+        )
+        if not path:
+            return
+
+        # Add extension if the user didn't type one
+        if not Path(path).suffix:
+            path += ".csv" if "CSV" in selected_filter else ".xlsx"
+
+        try:
+            log = MeasurementLogger(path)
+            log.create_new(wavelength_nm=self.wavelength_spin.value())
+        except MeasurementLogError as e:
+            QMessageBox.critical(
+                self, "Logging Error", f"Failed to create log file:\n{str(e)}"
+            )
+            return
+
+        self._set_log_file(log)
+
+    def open_log_file(self):
+        """Select an existing log file to append measurements to"""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Append to Measurement Log",
+            self._log_start_dir(),
+            self._log_file_filters(),
+        )
+        if not path:
+            return
+
+        try:
+            log = MeasurementLogger(path)
+        except MeasurementLogError as e:
+            QMessageBox.critical(self, "Logging Error", str(e))
+            return
+
+        self._set_log_file(log)
+
+    def _set_log_file(self, log: Optional[MeasurementLogger]):
+        """Set the active log file and update UI/settings"""
+        self.measurement_log = log
+        if log is not None:
+            self.log_file_label.setText(log.file_path.name)
+            self.log_file_label.setToolTip(str(log.file_path))
+            self.log_file_label.setStyleSheet("color: #2c3e50; font-weight: bold;")
+            self.settings.setValue("power_meter/log_file", str(log.file_path))
+            self.settings.setValue("power_meter/log_dir", str(log.file_path.parent))
+        else:
+            self.log_file_label.setText("No log file selected")
+            self.log_file_label.setToolTip("")
+            self.log_file_label.setStyleSheet("color: #7f8c8d; font-style: italic;")
+            self.settings.setValue("power_meter/log_file", "")
+        self.log_status_label.setText("")
+        self._update_log_controls()
+
+    def _update_log_controls(self):
+        """Enable the log button only when connected with a log file selected"""
+        connected = bool(self.controller.get_power_meters())
+        self.log_btn.setEnabled(connected and self.measurement_log is not None)
+
+    def log_measurement(self):
+        """Record the current readings to the measurement log.
+
+        Injection power = corrected reference power, lantern output power =
+        target power. When frozen, the frozen (held) readings are logged.
+        """
+        if self.measurement_log is None:
+            return
+
+        injection = self._last_corrected_ref
+        output = self._last_target_power
+
+        if injection is None and output is None:
+            QMessageBox.warning(
+                self,
+                "No Readings",
+                "No power readings available to log yet.",
+            )
+            return
+
+        port = self.port_spin.value()
+        try:
+            trial = self.measurement_log.append_measurement(
+                port=port,
+                injection_power_w=injection,
+                output_power_w=output,
+                wavelength_nm=self.wavelength_spin.value(),
+            )
+        except MeasurementLogError as e:
+            QMessageBox.critical(self, "Logging Error", str(e))
+            return
+
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log_status_label.setText(
+            f"Logged trial {trial} (port {port}) at {timestamp}"
+        )
+        self.settings.setValue("power_meter/log_port", port)
+
     def load_settings(self):
         """Restore power meter settings from QSettings"""
         self.wavelength_spin.setValue(
@@ -809,6 +1010,19 @@ class PowerMeterTab(QWidget):
         self._saved_target_resource = self.settings.value(
             "power_meter/target_resource", defaultValue="", type=str
         )
+
+        # Restore measurement log file if it still exists
+        self.port_spin.setValue(
+            self.settings.value("power_meter/log_port", defaultValue=1, type=int)
+        )
+        saved_log = self.settings.value(
+            "power_meter/log_file", defaultValue="", type=str
+        )
+        if saved_log and Path(saved_log).exists():
+            try:
+                self._set_log_file(MeasurementLogger(saved_log))
+            except MeasurementLogError:
+                pass  # e.g. openpyxl no longer installed
 
     def save_settings(self):
         """Persist current power meter settings to QSettings"""

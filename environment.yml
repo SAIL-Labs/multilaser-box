@@ -17,3 +17,4 @@ dependencies:
   - pyvisa
   - pyvisa-py
   - psutil
+  - openpyxl
