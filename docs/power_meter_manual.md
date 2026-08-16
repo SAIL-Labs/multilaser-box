@@ -92,12 +92,13 @@ Click on the "Power Meters" tab in the main application window.
 
 ### 4. Scan for Devices
 1. Click the "Scan for Power Meters" button
-2. The application will search for connected Thorlabs devices
+2. The application searches for connected Thorlabs devices (other USB
+   instruments are ignored and listed in the log)
 3. Status message will indicate:
-   - "Found 2 power meters - ready to connect" (ready to proceed)
+   - "Found 1/2 power meter(s) - ready to connect" (ready to proceed)
    - "No power meters found" (check connections)
-   - "Found 1 power meter (need 2)" (connect second device)
-   - "Found X power meters (need exactly 2)" (disconnect extra devices)
+4. If more than two Thorlabs meters are detected, a dialog lists them so
+   you can select which one or two to use
 
 ### 5. Connect to Power Meters
 1. Click the "Connect" button
@@ -155,6 +156,16 @@ Click on the "Power Meters" tab in the main application window.
   - Check USB connections
   - Install Thorlabs USB drivers (included with Optical Power Monitor software)
   - Try a different USB port
+- **Note**: The scan only accepts Thorlabs devices (USB vendor ID 0x1313).
+  If a meter is attached but not found, check the application log — ignored
+  USB instruments are listed there by resource name
+
+### Wrong or Extra Devices Detected
+- **Cause**: Before v0.7.1, any USB VISA instrument on the computer was
+  counted as a power meter
+- **Solution**: Update to v0.7.1 or later; non-Thorlabs instruments are now
+  filtered out, and if you genuinely have more than two meters attached, a
+  selection dialog lets you choose which ones to use
 
 ### Connection Error
 - **Cause**: Device in use by another application or permission issue

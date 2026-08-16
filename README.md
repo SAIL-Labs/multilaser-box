@@ -11,10 +11,12 @@ A Python-based control system for managing multiple lasers through an Arduino mi
 
 - **Intuitive GUI** - PyQt6-based interface with LED indicators and safety controls
 - **SCPI Protocol** - Industry-standard SCPI commands for professional integration
-- **Dual Power Meter Support** - Optional Thorlabs PM100USB integration (see [Power Meter Guide](POWER_METER_GUIDE.md))
+- **Dual Power Meter Support** - Optional Thorlabs PM100USB integration (see [Power Meter Guide](docs/power_meter_manual.md))
+- **Measurement Logging** - Log power readings to Excel or CSV with throughput/loss calculations
 - **Safety First** - Emergency stop, single-laser enforcement, automatic shutdown
 - **Cross-Platform** - Works on Windows, macOS, and Linux
 - **Standalone Executables** - Pre-built binaries available (no Python required)
+- **Auto-Update** - Standalone executables check GitHub for new releases and download them (to the app folder, or Downloads if the app folder isn't writable)
 - **Programmable API** - Use as a library in your own Python code
 
 ---

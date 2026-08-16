@@ -5,13 +5,16 @@
 This is a Python-based control system for managing multiple lasers through an Arduino microcontroller via serial communication. The system provides both a programmatic API and a PyQt6 graphical user interface for controlling up to 3 lasers, with optional Thorlabs PM100USB power meter integration and Excel/CSV measurement logging.
 
 **Authors:** Kok-Wei Bong, Chris Betters
-**Repository:** https://github.com/yourusername/multilaser-box
+**Repository:** https://github.com/SAIL-Labs/multilaser-box
 
 ## Non-Obvious Gotchas
 
 - **Excel log template:** `MeasurementLogger` generates Excel logs programmatically with the lantern throughput worksheet layout (Trial / Port / injection power / lantern output power in columns A-D, formulas for throughput, loss and per-port statistics). The layout matches the SAIL `throughput_new.xlsx` template, which is **intentionally NOT bundled** — it lives on the team OneDrive.
 - **openpyxl is an optional dependency** — CSV logging must keep working without it.
 - **2-second Arduino initialization delay** is required after opening the serial connection before sending commands.
+- **VISA resource strings format the USB vendor ID differently per backend**: NI-VISA uses hex (`USB0::0x1313::...`), pyvisa-py uses decimal (`USB0::4883::...`). The Thorlabs filter in `find_power_meters()` must accept both forms — this mismatch is why the filter was once commented out, which made any USB instrument count as a power meter.
+- **CI builds install unpinned latest pyvisa/pyvisa-py/pyusb**, so two builds of identical source can enumerate USB devices differently (this surfaced the scan bug as a "v0.7.0 regression").
+- **The auto-updater (`updater.py`) never overwrites the running exe** — it downloads the new versioned exe next to the current one, falling back to the user's Downloads folder when the app folder isn't writable (Program Files, read-only shares). The user runs the new exe manually.
 
 ## Key Design Patterns
 
@@ -86,7 +89,6 @@ This is a Python-based control system for managing multiple lasers through an Ar
 
 ### Current Issues
 - `turn_on_laser()` debug mode commented out in GUI (line 446-451 in `multilaser/laser_controller_gui.py`)
-- Repository URL placeholder in setup.py and README.md
 
 ### Future Enhancements
 - Add laser intensity control (PWM)
