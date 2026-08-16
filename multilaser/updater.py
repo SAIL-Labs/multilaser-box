@@ -11,6 +11,7 @@ PyQt6 QThread for background operations.
 
 import json
 import logging
+import os
 import shutil
 import ssl
 import tempfile
@@ -55,10 +56,13 @@ EXE_GLOB = "MultiLaserController-v*.exe"
 def parse_version(version_string: str) -> tuple:
     """Parse a version string like '0.5.1' or 'v0.5.1' into a comparable tuple.
 
+    Pre-release/build suffixes ("0.8.0-rc1", "0.8.0+abc123") are ignored.
+
     Returns:
         Tuple of ints, e.g. (0, 5, 1).
     """
     s = version_string.strip().lstrip("v")
+    s = s.split("-")[0].split("+")[0]
     return tuple(int(x) for x in s.split("."))
 
 
@@ -127,6 +131,64 @@ def check_for_update(current_version: str) -> Optional[UpdateInfo]:
     )
 
 
+def _place_exe(src_exe: Path, dest_dir: Path) -> Path:
+    """Copy src_exe into dest_dir, replacing an existing file safely.
+
+    Copies to a temporary name first and then renames into place, so a
+    partially written file is never left under the final name and an
+    existing (non-running) copy is replaced atomically.
+    """
+    dest_exe = dest_dir / src_exe.name
+    tmp_dest = dest_dir / (src_exe.name + ".part")
+    try:
+        shutil.copy2(str(src_exe), str(tmp_dest))
+        os.replace(str(tmp_dest), str(dest_exe))
+    except OSError:
+        try:
+            tmp_dest.unlink()
+        except OSError:
+            pass
+        raise
+    return dest_exe
+
+
+def _deliver_exe(src_exe: Path, dest_dir: Path) -> Path:
+    """Place the new exe in dest_dir, falling back to Downloads if not writable.
+
+    On Windows the exe may live in a folder the user cannot write to
+    (Program Files, a read-only network share, a Defender-protected
+    folder). In that case the update is saved to the user's Downloads
+    folder instead.
+
+    Returns:
+        Path to the delivered exe (parent differs from dest_dir when the
+        fallback was used).
+
+    Raises:
+        PermissionError: If neither destination is writable, with a
+            message naming the folders that were tried.
+    """
+    try:
+        return _place_exe(src_exe, dest_dir)
+    except OSError as primary_error:
+        fallback_dir = Path.home() / "Downloads"
+        tried = str(dest_dir)
+        if fallback_dir != dest_dir and fallback_dir.is_dir():
+            logging.warning(
+                f"Could not save update to {dest_dir} ({primary_error}); "
+                f"falling back to {fallback_dir}"
+            )
+            try:
+                return _place_exe(src_exe, fallback_dir)
+            except OSError:
+                tried += f" or {fallback_dir}"
+        raise PermissionError(
+            f"Could not save the update to {tried}:\n{primary_error}\n\n"
+            "Check that the folder is writable and that the new version "
+            "is not already running."
+        ) from primary_error
+
+
 def download_update(
     download_url: str,
     dest_dir: Path,
@@ -137,15 +199,18 @@ def download_update(
 
     Args:
         download_url: URL to the release zip asset.
-        dest_dir: Directory to place the downloaded exe (alongside current exe).
+        dest_dir: Preferred directory for the downloaded exe (alongside the
+            current exe). Falls back to the user's Downloads folder when
+            dest_dir is not writable.
         progress_callback: Optional callable(bytes_downloaded, total_bytes).
         cancel_check: Optional callable() -> bool that returns True if cancelled.
 
     Returns:
-        Path to the new exe in dest_dir.
+        Path to the new exe (may be in the Downloads fallback folder).
 
     Raises:
         Exception: If download is cancelled.
+        PermissionError: If the exe could not be saved to any destination.
     """
     req = urllib.request.Request(
         download_url,
@@ -187,10 +252,7 @@ def download_update(
             )
 
         src_exe = exe_candidates[0]
-        dest_exe = dest_dir / src_exe.name
-
-        # Copy to destination folder
-        shutil.copy2(str(src_exe), str(dest_exe))
+        dest_exe = _deliver_exe(src_exe, dest_dir)
         logging.info(f"Update downloaded to {dest_exe}")
 
         return dest_exe

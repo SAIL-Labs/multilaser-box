@@ -131,6 +131,7 @@ class LaserControlGUI(QMainWindow):
         self._pending_update = None
         self._update_manual = False
         self._update_worker = None
+        self._update_dest_dir = None
 
         self.init_ui()
         self.populate_com_ports()
@@ -834,6 +835,7 @@ class LaserControlGUI(QMainWindow):
             dest_dir = Path(sys.executable).parent
         else:
             dest_dir = Path.cwd()
+        self._update_dest_dir = dest_dir
 
         self._progress = QProgressDialog(
             f"Downloading v{info.latest_version}...",
@@ -875,12 +877,20 @@ class LaserControlGUI(QMainWindow):
 
         new_exe = Path(exe_path_str)
 
+        location_note = ""
+        if new_exe.parent != self._update_dest_dir:
+            location_note = (
+                f"\n\nThe application folder wasn't writable, so it was "
+                f"saved to:\n{new_exe.parent}"
+            )
+
         QMessageBox.information(
             self,
             "Update Downloaded",
             f"New version downloaded:\n\n"
             f"{new_exe.name}\n\n"
-            f"Close this application and run the new version.",
+            f"Close this application and run the new version."
+            f"{location_note}",
         )
 
         # Open Explorer with the new exe selected
