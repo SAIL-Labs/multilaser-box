@@ -131,3 +131,5 @@ $RECYCLE.BIN/
 # Conda
 *.conda
 .conda_env/
+Thorlabs PMxxx Power Meters
+settings.local.json
