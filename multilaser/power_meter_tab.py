@@ -26,6 +26,9 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QDoubleSpinBox,
     QFileDialog,
+    QDialog,
+    QDialogButtonBox,
+    QCheckBox,
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings
 from PyQt6.QtGui import QFont
@@ -42,6 +45,49 @@ from multilaser.measurement_logger import (
     MeasurementLogError,
     OPENPYXL_AVAILABLE,
 )
+
+
+class MeterSelectionDialog(QDialog):
+    """Dialog to choose which power meters to use when more than two are found"""
+
+    MAX_SELECTED = 2
+
+    def __init__(self, resources, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Power Meters")
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(
+            QLabel(
+                f"{len(resources)} power meters were detected.\n"
+                f"Select up to {self.MAX_SELECTED} to use:"
+            )
+        )
+
+        self._checkboxes = []
+        for resource in resources:
+            checkbox = QCheckBox(resource)
+            checkbox.toggled.connect(self._update_ok_button)
+            layout.addWidget(checkbox)
+            self._checkboxes.append(checkbox)
+
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+        layout.addWidget(self._buttons)
+
+        self._update_ok_button()
+
+    def selected_resources(self):
+        """Return the resource names of the checked meters"""
+        return [cb.text() for cb in self._checkboxes if cb.isChecked()]
+
+    def _update_ok_button(self):
+        count = len(self.selected_resources())
+        ok_button = self._buttons.button(QDialogButtonBox.StandardButton.Ok)
+        ok_button.setEnabled(1 <= count <= self.MAX_SELECTED)
 
 
 class PowerDisplay(QWidget):
@@ -454,16 +500,21 @@ class PowerMeterTab(QWidget):
                 self.connect_btn.setEnabled(True)
 
             else:
-                QMessageBox.warning(
-                    self,
-                    "Too Many Devices",
-                    f"Found {count} power meters.\n\n"
-                    "This application supports up to 2 power meters.\n"
-                    "Please disconnect extra devices.",
-                )
-                self.status_label.setText(f"Found {count} power meters (need 1 or 2)")
-                self.status_label.setStyleSheet("color: #e67e22; font-weight: bold;")
-                self.connect_btn.setEnabled(False)
+                dialog = MeterSelectionDialog(self.available_meters, self)
+                if dialog.exec():
+                    self.available_meters = dialog.selected_resources()
+                    selected = len(self.available_meters)
+                    self.status_label.setText(
+                        f"Selected {selected} of {count} power meters - ready to connect"
+                    )
+                    self.status_label.setStyleSheet("color: #27ae60; font-weight: bold;")
+                    self.connect_btn.setEnabled(True)
+                else:
+                    self.status_label.setText(
+                        f"Found {count} power meters - none selected (scan again to choose)"
+                    )
+                    self.status_label.setStyleSheet("color: #e67e22; font-weight: bold;")
+                    self.connect_btn.setEnabled(False)
 
         except PowerMeterError as e:
             QMessageBox.critical(

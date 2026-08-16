@@ -221,12 +221,17 @@ class PowerMeterController:
             # Find all USB VISA instruments
             resources = self.rm.list_resources("USB?*::INSTR")
 
-            # Filter for Thorlabs devices (VID: 0x1313)
-            # thorlabs_resources = []
-            # for resource in resources:
-            #     if "0x1313" in resource:
-            #         thorlabs_resources.append(resource)
-            thorlabs_resources=resources
+            # Filter for Thorlabs devices (VID 0x1313). The VID field is
+            # formatted as hex by NI-VISA ("0x1313") but as decimal by
+            # pyvisa-py ("4883"), so accept both forms.
+            thorlabs_resources = []
+            for resource in resources:
+                parts = resource.split("::")
+                vid = parts[1].lower() if len(parts) > 1 else ""
+                if vid in ("0x1313", "4883"):
+                    thorlabs_resources.append(resource)
+                else:
+                    logging.info(f"Ignoring non-Thorlabs USB instrument: {resource}")
             logging.info(f"Found {len(thorlabs_resources)} Thorlabs power meter(s)")
             return thorlabs_resources
 
