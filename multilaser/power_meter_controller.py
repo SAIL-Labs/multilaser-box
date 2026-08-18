@@ -203,17 +203,23 @@ SIM_RESOURCE_PREFIX = "SIM::"
 class SimulatedPowerMeter(PowerMeter):
     """Simulated power meter for testing the GUI without hardware.
 
-    Produces a slowly drifting power reading with measurement noise;
-    averaging reduces the noise as it would on a real meter. Meter 1
-    simulates ~2 mW and meter 2 ~1.5 mW so the default ratio/throughput
-    displays read 75%.
+    Models the real bench: a ~2 mW laser into a 10/90 fibre splitter, with
+    the 10% tap on meter 1 (the reference, ~200 uW) and the 90% arm on
+    meter 2 (the target, ~1.8 mW), so Calibrate Now yields a factor of ~9.
+    Both meters share the same slow source drift (same laser) with
+    independent measurement noise; averaging reduces the noise as it would
+    on a real meter.
     """
 
-    BASE_POWERS_W = [2.0e-3, 1.5e-3]
+    SOURCE_POWER_W = 2.0e-3  # simulated laser power
+    SPLIT_FRACTIONS = [0.10, 0.90]  # 10/90 splitter: meter 1 is the reference tap
 
     def __init__(self, resource_name: str, index: int = 0):
         super().__init__(resource_name, rm=None)
-        self._base_power = self.BASE_POWERS_W[index % len(self.BASE_POWERS_W)]
+        self._base_power = (
+            self.SOURCE_POWER_W
+            * self.SPLIT_FRACTIONS[index % len(self.SPLIT_FRACTIONS)]
+        )
         self._serial = f"SIM{index + 1:04d}"
 
     def connect(self):

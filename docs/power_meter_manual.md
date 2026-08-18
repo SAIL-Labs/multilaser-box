@@ -83,13 +83,19 @@ Without openpyxl, measurement logging still works but only in CSV format.
 - Trial numbers auto-increment; the port number is set in the GUI
 - Append to an existing log file to continue a measurement session
 - Logged measurements are shown live in a table beside the controls;
-  selecting an existing log file loads its measurements into the table
+  selecting an existing log file loads its measurements into the table.
+  For report logs the table is port-keyed and shows both the recorded raw
+  reference reading and the calculated injection power (Launch × Ref/PMREF)
 - Works with Freeze: freeze the display, then log the held readings
 
 ### Simulated Meters (Testing)
 - The Power Meters tab can run without hardware: when a scan finds no
-  meters, the dialog offers two simulated meters (~2 mW and ~1.5 mW with
-  realistic noise and drift)
+  meters, the dialog offers two simulated meters modelling a ~2 mW laser
+  into a 10/90 splitter (meter 1 = 10% reference tap ~200 uW, meter 2 =
+  90% arm ~1.8 mW, with realistic noise and shared drift)
+- "Calibrate Now" works without an active laser after a confirmation (the
+  factor just isn't saved to a laser's settings) — needed when testing
+  with simulated meters and no laser box attached
 - Set the `MULTILASER_SIM_METERS` environment variable to `1` or `2` to
   skip the hardware scan entirely (works without pyvisa installed)
 - The status label shows "SIMULATED" while simulated meters are connected
@@ -152,7 +158,11 @@ Click on the "Power Meters" tab in the main application window.
      lantern serial number. Use "Calibrate Now" (with the reference patch
      cord in the target meter) to record the PMREF/Launch cells, then log
      each port — measurements go to the sheet matching the current
-     wavelength, and re-logging a port overwrites its row
+     wavelength, and the Port spinner advances automatically after each
+     log so repeated logs walk down the ports; spin back to re-log a port
+     (its row is overwritten). If you calibrated before selecting the
+     report file, you are offered to record those readings when the
+     report is attached
    - **CSV File (.csv)**: plain-text log with computed throughput and loss
 2. Or click "Append to Existing…" to continue an earlier log file — the
    layout of an existing Excel log is detected automatically

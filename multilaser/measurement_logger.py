@@ -213,8 +213,10 @@ class MeasurementLogger:
 
         Returns an empty list if the file does not exist yet. Rows with no
         data in the trial/port/power columns are skipped. For report logs,
-        rows come from the sheet nearest wavelength_nm (first sheet if None)
-        and injection power is derived from the sheet's Launch/PMREF cells.
+        rows come from the sheet nearest wavelength_nm (first sheet if None),
+        injection power is derived from the sheet's Launch/PMREF cells, and
+        each tuple carries a 5th element: the raw reference reading (W)
+        stored in the sheet.
         """
         if not self.file_path.exists():
             return []
@@ -559,6 +561,25 @@ class MeasurementLogger:
             f"{self.file_path.name}"
         )
 
+    def get_report_calibration(self, wavelength_nm: Optional[int] = None):
+        """Return (pmref_w, launch_w) from a report sheet, or None if not set"""
+        if (
+            self.format != "xlsx"
+            or not self.file_path.exists()
+            or self._resolve_layout() != "report"
+        ):
+            return None
+        wb = self._load_workbook(read_only=True)
+        try:
+            ws = self._report_sheet(wb, wavelength_nm)
+            pmref_uw = ws[REPORT_PMREF_CELL].value
+            launch_mw = ws[REPORT_LAUNCH_CELL].value
+            if isinstance(pmref_uw, (int, float)) and isinstance(launch_mw, (int, float)):
+                return pmref_uw * 1e-6, launch_mw * 1e-3
+            return None
+        finally:
+            wb.close()
+
     def _read_report_xlsx(self, wavelength_nm: Optional[int]):
         wb = self._load_workbook(read_only=True)
         try:
@@ -582,10 +603,14 @@ class MeasurementLogger:
                 output_w = (
                     output_mw * 1e-3 if isinstance(output_mw, (int, float)) else None
                 )
+                raw_ref_w = (
+                    ref_uw * 1e-6 if isinstance(ref_uw, (int, float)) else None
+                )
                 injection_w = None
-                if have_calibration and isinstance(ref_uw, (int, float)):
+                if have_calibration and raw_ref_w is not None:
                     injection_w = (launch_mw * 1e-3) * (ref_uw / pmref_uw)
-                rows.append((port, port, injection_w, output_w))
+                # 5th element: the raw reference actually stored in the sheet
+                rows.append((port, port, injection_w, output_w, raw_ref_w))
             return rows
         finally:
             wb.close()

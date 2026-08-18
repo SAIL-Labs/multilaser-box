@@ -107,9 +107,10 @@ the measurements table) without any hardware attached:
   launching to skip the hardware scan entirely (works without pyvisa
   installed).
 
-Simulated meters read ~2 mW (meter 1) and ~1.5 mW (meter 2) with realistic
-noise and slow drift; the status bar shows "SIMULATED" while they are
-connected.
+Simulated meters model the real bench — a ~2 mW laser into a 10/90 splitter,
+with the 10% tap on meter 1 (reference, ~200 µW) and the 90% arm on meter 2
+(target, ~1.8 mW) — with realistic noise and shared slow drift; the status
+bar shows "SIMULATED" while they are connected.
 
 ### Python API
 
