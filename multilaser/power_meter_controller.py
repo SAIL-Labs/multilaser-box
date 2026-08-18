@@ -10,7 +10,13 @@ Author: Based on Thorlabs PMxxx_SCPI examples
 Date: 2025-12-08
 """
 
+from __future__ import annotations
+
 import logging
+import math
+import os
+import random
+import time
 from typing import Optional, List, Tuple
 from enum import Enum
 
@@ -191,14 +197,60 @@ class PowerMeter:
         return self.resource_name.split('::')[-2] if '::' in self.resource_name else self.resource_name
 
 
+SIM_RESOURCE_PREFIX = "SIM::"
+
+
+class SimulatedPowerMeter(PowerMeter):
+    """Simulated power meter for testing the GUI without hardware.
+
+    Produces a slowly drifting power reading with measurement noise;
+    averaging reduces the noise as it would on a real meter. Meter 1
+    simulates ~2 mW and meter 2 ~1.5 mW so the default ratio/throughput
+    displays read 75%.
+    """
+
+    BASE_POWERS_W = [2.0e-3, 1.5e-3]
+
+    def __init__(self, resource_name: str, index: int = 0):
+        super().__init__(resource_name, rm=None)
+        self._base_power = self.BASE_POWERS_W[index % len(self.BASE_POWERS_W)]
+        self._serial = f"SIM{index + 1:04d}"
+
+    def connect(self):
+        self.device_info = f"Thorlabs,PM100USB,{self._serial},1.0 (simulated)"
+        self.connected = True
+        logging.info(f"Connected to simulated power meter: {self.device_info}")
+
+    def disconnect(self):
+        self.connected = False
+        logging.info(f"Disconnected from simulated power meter: {self.device_info}")
+
+    def configure_default_settings(self):
+        pass  # nothing to configure
+
+    def set_wavelength(self, wavelength_nm: int):
+        self._wavelength = wavelength_nm
+
+    def set_averaging(self, samples: int):
+        self._averaging = samples
+
+    def read_power(self) -> float:
+        if not self.connected:
+            raise PowerMeterError("Not connected to power meter")
+        # ±2% sinusoidal drift (30 s period) so the display visibly changes
+        drift = 1.0 + 0.02 * math.sin(2.0 * math.pi * time.time() / 30.0)
+        # 1% Gaussian noise, reduced by averaging like a real meter
+        noise = random.gauss(0.0, 0.01) / math.sqrt(max(1, self._averaging))
+        return self._base_power * drift * (1.0 + noise)
+
+
 class PowerMeterController:
     """Controller for managing one or two Thorlabs PM100USB power meters"""
 
     def __init__(self):
         """Initialize the power meter controller"""
-        if pyvisa is None:
-            raise PowerMeterError("PyVISA is not installed. Install with: pip install pyvisa pyvisa-py")
-
+        # PyVISA is only required for real hardware; simulated meters
+        # (see simulated_resources) work without it.
         self.rm = None
         self.power_meters: List[PowerMeter] = []
         self.reference_meter: Optional[PowerMeter] = None
@@ -207,13 +259,40 @@ class PowerMeterController:
 
         logging.basicConfig(level=logging.INFO)
 
+    @staticmethod
+    def simulated_resources(count: int = 2) -> List[str]:
+        """Return resource names for simulated power meters (for testing)"""
+        return [
+            f"{SIM_RESOURCE_PREFIX}0x1313::0x8078::SIM{i + 1:04d}::INSTR"
+            for i in range(count)
+        ]
+
+    @staticmethod
+    def is_simulated_resource(resource_name: str) -> bool:
+        """Check whether a resource name refers to a simulated meter"""
+        return resource_name.startswith(SIM_RESOURCE_PREFIX)
+
     def find_power_meters(self) -> List[str]:
         """
         Find all available Thorlabs power meters
 
+        Set the MULTILASER_SIM_METERS environment variable to 1 or 2 to skip
+        the hardware scan and return that many simulated meters instead.
+
         Returns:
             List of VISA resource names for found power meters
         """
+        sim_env = os.environ.get("MULTILASER_SIM_METERS", "").strip()
+        if sim_env and sim_env != "0":
+            count = int(sim_env) if sim_env in ("1", "2") else 2
+            logging.info(f"MULTILASER_SIM_METERS set: using {count} simulated meter(s)")
+            return self.simulated_resources(count)
+
+        if pyvisa is None:
+            raise PowerMeterError(
+                "PyVISA is not installed. Install with: pip install pyvisa pyvisa-py"
+            )
+
         try:
             if self.rm is None:
                 self.rm = pyvisa.ResourceManager()
@@ -250,8 +329,17 @@ class PowerMeterController:
 
         self.power_meters.clear()
 
-        for resource_name in resource_names:
-            pm = PowerMeter(resource_name, self.rm)
+        for i, resource_name in enumerate(resource_names):
+            if self.is_simulated_resource(resource_name):
+                pm = SimulatedPowerMeter(resource_name, index=i)
+            else:
+                if pyvisa is None:
+                    raise PowerMeterError(
+                        "PyVISA is not installed. Install with: pip install pyvisa pyvisa-py"
+                    )
+                if self.rm is None:
+                    self.rm = pyvisa.ResourceManager()
+                pm = PowerMeter(resource_name, self.rm)
             pm.connect()
             self.power_meters.append(pm)
 

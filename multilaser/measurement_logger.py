@@ -146,6 +146,18 @@ class MeasurementLogger:
             return self._append_xlsx(port, injection_power_w, output_power_w)
         return self._append_csv(port, injection_power_w, output_power_w, wavelength_nm)
 
+    def read_measurements(self):
+        """Return logged measurements as (trial, port, injection_w, output_w) tuples.
+
+        Returns an empty list if the file does not exist yet. Rows with no
+        data in the trial/port/power columns are skipped.
+        """
+        if not self.file_path.exists():
+            return []
+        if self.format == "xlsx":
+            return self._read_xlsx()
+        return self._read_csv()
+
     # === Excel implementation ===
 
     def _create_xlsx(self, wavelength_nm: Optional[int]):
@@ -267,6 +279,30 @@ class MeasurementLogger:
         )
         return trial
 
+    def _read_xlsx(self):
+        try:
+            wb = openpyxl.load_workbook(self.file_path, read_only=True, data_only=True)
+        except PermissionError:
+            raise MeasurementLogError(self._locked_file_message())
+        except Exception as e:
+            raise MeasurementLogError(f"Failed to open log file:\n{str(e)}")
+
+        try:
+            ws = wb.worksheets[0]
+            rows = []
+            for row in ws.iter_rows(
+                min_row=FIRST_DATA_ROW,
+                min_col=COL_TRIAL,
+                max_col=COL_OUTPUT,
+                values_only=True,
+            ):
+                if all(value is None for value in row):
+                    continue
+                rows.append(tuple(row))
+            return rows
+        finally:
+            wb.close()
+
     # === CSV implementation ===
 
     def _create_csv(self):
@@ -341,6 +377,25 @@ class MeasurementLogger:
             f"Logged trial {trial} (port {port}) to {self.file_path.name}"
         )
         return trial
+
+    def _read_csv(self):
+        rows = []
+        try:
+            with open(self.file_path, "r", newline="") as f:
+                for row in csv.reader(f):
+                    if len(row) < 5:
+                        continue
+                    try:
+                        trial = int(row[1])
+                        port = int(row[2])
+                    except ValueError:
+                        continue  # header or malformed row
+                    injection = float(row[3]) if row[3] else None
+                    output = float(row[4]) if row[4] else None
+                    rows.append((trial, port, injection, output))
+        except OSError as e:
+            raise MeasurementLogError(f"Failed to read log file:\n{str(e)}")
+        return rows
 
     def _locked_file_message(self) -> str:
         return (

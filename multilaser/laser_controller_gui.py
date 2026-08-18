@@ -144,7 +144,7 @@ class LaserControlGUI(QMainWindow):
     def init_ui(self):
         """Initialise the user interface"""
         self.setWindowTitle(f"Multi-Laser Controller v{__version__}")
-        self.setGeometry(100, 100, 800, 600)
+        self.setGeometry(100, 100, 1150, 650)
 
         # Menu bar
         menu_bar = self.menuBar()

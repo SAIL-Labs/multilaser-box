@@ -11,6 +11,8 @@ Date: 2025-12-08
 """
 
 import logging
+import math
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +31,10 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QCheckBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QAbstractItemView,
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings
 from PyQt6.QtGui import QFont
@@ -190,6 +196,10 @@ class PowerMeterTab(QWidget):
         self.measurement_log: Optional[MeasurementLogger] = None
         self._last_corrected_ref: Optional[float] = None
         self._last_target_power: Optional[float] = None
+        # Rolling buffers of recent displayed readings; logged measurements
+        # are the average of these (see log_measurement)
+        self._ref_history: deque = deque(maxlen=10)
+        self._target_history: deque = deque(maxlen=10)
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update_readings)
 
@@ -440,23 +450,61 @@ class PowerMeterTab(QWidget):
         # Log measurement row
         log_row = QHBoxLayout()
 
-        log_row.addWidget(QLabel("Port:"))
+        port_label = QLabel("Port:")
+        port_label.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        log_row.addWidget(port_label)
         self.port_spin = QSpinBox()
         self.port_spin.setRange(1, 99)
         self.port_spin.setValue(1)
+        self.port_spin.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        self.port_spin.setMinimumWidth(70)
+        self.port_spin.setMinimumHeight(36)
         self.port_spin.setToolTip("Lantern port number recorded with each measurement")
         log_row.addWidget(self.port_spin)
 
         log_row.addSpacing(20)
 
+        log_row.addWidget(QLabel("Average over:"))
+        self.log_avg_spin = QSpinBox()
+        self.log_avg_spin.setRange(1, 100)
+        self.log_avg_spin.setValue(10)
+        self.log_avg_spin.setSuffix(" readings")
+        self.log_avg_spin.setToolTip(
+            "Each logged measurement is the average of this many recent\n"
+            "display readings (at the current update rate)"
+        )
+        self.log_avg_spin.valueChanged.connect(self._on_log_avg_changed)
+        log_row.addWidget(self.log_avg_spin)
+
+        log_row.addSpacing(20)
+
         self.log_btn = QPushButton("Log Measurement")
-        self.log_btn.setMinimumWidth(150)
+        self.log_btn.setMinimumWidth(180)
+        self.log_btn.setMinimumHeight(40)
         self.log_btn.setEnabled(False)
         self.log_btn.setToolTip(
-            "Record the current readings to the log file:\n"
+            "Record the average of the recent readings to the log file:\n"
             "injection power = corrected reference, output power = target"
         )
         self.log_btn.clicked.connect(self.log_measurement)
+        self.log_btn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #27ae60;
+                color: white;
+                font-weight: bold;
+                font-size: 14px;
+                padding: 8px 16px;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: #229954;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+            }
+        """
+        )
         log_row.addWidget(self.log_btn)
 
         self.log_status_label = QLabel("")
@@ -471,11 +519,108 @@ class PowerMeterTab(QWidget):
 
         main_layout.addStretch()
 
-        self.setLayout(main_layout)
+        # === Side-by-side layout: controls on the left, measurement table on the right ===
+        controls_widget = QWidget()
+        controls_widget.setLayout(main_layout)
+
+        outer_layout = QHBoxLayout()
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+        outer_layout.addWidget(controls_widget, stretch=3)
+        outer_layout.addWidget(self._create_measurement_table_panel(), stretch=2)
+
+        self.setLayout(outer_layout)
 
         # Connect role combo signals after UI initialization to avoid loops
         self.ref_combo.currentIndexChanged.connect(self.update_role_assignment)
         self.target_combo.currentIndexChanged.connect(self.update_role_assignment)
+
+    def _create_measurement_table_panel(self) -> QGroupBox:
+        """Create the logged-measurements table shown beside the controls"""
+        panel = QGroupBox("Logged Measurements")
+        layout = QVBoxLayout()
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        self.measurement_table = QTableWidget(0, 6)
+        self.measurement_table.setHorizontalHeaderLabels(
+            ["Trial", "Port", "Injection", "Output", "Throughput", "Loss (dB)"]
+        )
+        self.measurement_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.measurement_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.measurement_table.setAlternatingRowColors(True)
+        self.measurement_table.verticalHeader().setVisible(False)
+        header = self.measurement_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.measurement_table)
+
+        self.table_summary_label = QLabel("No measurements")
+        self.table_summary_label.setStyleSheet("color: #7f8c8d; font-style: italic;")
+        layout.addWidget(self.table_summary_label)
+
+        panel.setLayout(layout)
+        return panel
+
+    def _append_table_row(self, trial, port, injection_w, output_w):
+        """Add one measurement row to the table"""
+        throughput = loss_db = None
+        if (
+            isinstance(injection_w, (int, float))
+            and isinstance(output_w, (int, float))
+            and injection_w > 0
+        ):
+            throughput = output_w / injection_w
+            if throughput > 0:
+                loss_db = 10.0 * math.log10(throughput)
+
+        def power_text(value):
+            if isinstance(value, (int, float)):
+                return format_power_auto_scale(value)
+            return "---"
+
+        values = [
+            str(trial) if trial is not None else "",
+            str(port) if port is not None else "",
+            power_text(injection_w),
+            power_text(output_w),
+            f"{throughput * 100:.1f} %" if throughput is not None else "---",
+            f"{loss_db:.2f}" if loss_db is not None else "---",
+        ]
+
+        row = self.measurement_table.rowCount()
+        self.measurement_table.insertRow(row)
+        for col, text in enumerate(values):
+            item = QTableWidgetItem(text)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.measurement_table.setItem(row, col, item)
+
+        self.measurement_table.scrollToBottom()
+        self._update_table_summary()
+
+    def _update_table_summary(self):
+        count = self.measurement_table.rowCount()
+        if count == 0:
+            self.table_summary_label.setText("No measurements")
+        else:
+            self.table_summary_label.setText(f"{count} measurement(s)")
+
+    def _reload_measurement_table(self):
+        """Rebuild the table from the current log file (empty if none)"""
+        self.measurement_table.setRowCount(0)
+        if self.measurement_log is not None:
+            try:
+                for trial, port, injection, output in (
+                    self.measurement_log.read_measurements()
+                ):
+                    self._append_table_row(trial, port, injection, output)
+            except MeasurementLogError as e:
+                logging.getLogger(__name__).warning(
+                    f"Could not read existing measurements: {e}"
+                )
+        self._update_table_summary()
 
     def scan_power_meters(self):
         """Scan for available power meters"""
@@ -484,15 +629,26 @@ class PowerMeterTab(QWidget):
             count = len(self.available_meters)
 
             if count == 0:
-                QMessageBox.warning(
+                reply = QMessageBox.question(
                     self,
                     "No Devices Found",
                     "No Thorlabs power meters found.\n\n"
-                    "Make sure the devices are connected and drivers are installed.",
+                    "Make sure the devices are connected and drivers are installed.\n\n"
+                    "Use simulated power meters instead (for testing without hardware)?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
                 )
-                self.status_label.setText("No power meters found")
-                self.status_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
-                self.connect_btn.setEnabled(False)
+                if reply == QMessageBox.StandardButton.Yes:
+                    self.available_meters = self.controller.simulated_resources()
+                    self.status_label.setText(
+                        "Simulation mode - 2 simulated meters ready to connect"
+                    )
+                    self.status_label.setStyleSheet("color: #f39c12; font-weight: bold;")
+                    self.connect_btn.setEnabled(True)
+                else:
+                    self.status_label.setText("No power meters found")
+                    self.status_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
+                    self.connect_btn.setEnabled(False)
 
             elif count in [1, 2]:
                 self.status_label.setText(f"Found {count} power meter(s) - ready to connect")
@@ -625,8 +781,18 @@ class PowerMeterTab(QWidget):
             """
             )
 
-            self.status_label.setText(f"Connected to {num_meters} power meter(s)")
-            self.status_label.setStyleSheet("color: #27ae60; font-weight: bold;")
+            simulated = any(
+                self.controller.is_simulated_resource(pm.resource_name)
+                for pm in meters
+            )
+            if simulated:
+                self.status_label.setText(
+                    f"Connected to {num_meters} SIMULATED power meter(s)"
+                )
+                self.status_label.setStyleSheet("color: #f39c12; font-weight: bold;")
+            else:
+                self.status_label.setText(f"Connected to {num_meters} power meter(s)")
+                self.status_label.setStyleSheet("color: #27ae60; font-weight: bold;")
 
             self._update_log_controls()
 
@@ -676,6 +842,7 @@ class PowerMeterTab(QWidget):
 
         self._last_corrected_ref = None
         self._last_target_power = None
+        self._clear_reading_history()
         self._update_log_controls()
 
         self.ratio_label.setText("Target / Reference = ---")
@@ -741,6 +908,8 @@ class PowerMeterTab(QWidget):
 
             try:
                 self.controller.assign_roles(ref_index, target_index)
+                # Buffered readings came from the previous role assignment
+                self._clear_reading_history()
 
                 # Update device info in displays
                 meters = self.controller.get_power_meters()
@@ -858,10 +1027,25 @@ class PowerMeterTab(QWidget):
             """
             )
 
+    def _clear_reading_history(self, ref: bool = True, target: bool = True):
+        """Drop buffered readings that no longer reflect the current setup"""
+        if ref:
+            self._ref_history.clear()
+        if target:
+            self._target_history.clear()
+
+    def _on_log_avg_changed(self, value: int):
+        """Resize the averaging buffers, keeping the most recent readings"""
+        self._ref_history = deque(self._ref_history, maxlen=value)
+        self._target_history = deque(self._target_history, maxlen=value)
+        self.settings.setValue("power_meter/log_averaging", value)
+
     def _on_calibration_changed(self, value: float):
         """Handle manual calibration factor change"""
         if value > 0:
             self.controller.set_calibration_factor(value)
+            # Buffered corrected-reference readings used the old factor
+            self._clear_reading_history(ref=True, target=False)
             # Persist to the active laser's QSettings key
             if self.active_laser_number is not None:
                 self.settings.setValue(
@@ -881,6 +1065,8 @@ class PowerMeterTab(QWidget):
             self.calibration_spin.blockSignals(True)
             self.calibration_spin.setValue(factor)
             self.calibration_spin.blockSignals(False)
+            # Buffered corrected-reference readings used the old factor
+            self._clear_reading_history(ref=True, target=False)
             # Persist to the active laser's QSettings key
             self.settings.setValue(
                 f"laser/calibration_factor_{self.active_laser_number}", factor
@@ -899,6 +1085,10 @@ class PowerMeterTab(QWidget):
             # (frozen display holds these values since the timer is stopped)
             self._last_corrected_ref = corrected_ref
             self._last_target_power = target_power
+            if corrected_ref is not None:
+                self._ref_history.append(corrected_ref)
+            if target_power is not None:
+                self._target_history.append(target_power)
 
             # Show corrected reference as main display
             self.ref_display.update_power(corrected_ref)
@@ -997,6 +1187,7 @@ class PowerMeterTab(QWidget):
             self.log_file_label.setStyleSheet("color: #7f8c8d; font-style: italic;")
             self.settings.setValue("power_meter/log_file", "")
         self.log_status_label.setText("")
+        self._reload_measurement_table()
         self._update_log_controls()
 
     def _update_log_controls(self):
@@ -1005,16 +1196,26 @@ class PowerMeterTab(QWidget):
         self.log_btn.setEnabled(connected and self.measurement_log is not None)
 
     def log_measurement(self):
-        """Record the current readings to the measurement log.
+        """Record the averaged recent readings to the measurement log.
 
         Injection power = corrected reference power, lantern output power =
-        target power. When frozen, the frozen (held) readings are logged.
+        target power. Each value is the average of the buffered recent
+        display readings (up to the "Average over" count). When frozen, the
+        readings buffered before the freeze are logged.
         """
         if self.measurement_log is None:
             return
 
-        injection = self._last_corrected_ref
-        output = self._last_target_power
+        injection = (
+            sum(self._ref_history) / len(self._ref_history)
+            if self._ref_history
+            else None
+        )
+        output = (
+            sum(self._target_history) / len(self._target_history)
+            if self._target_history
+            else None
+        )
 
         if injection is None and output is None:
             QMessageBox.warning(
@@ -1036,9 +1237,12 @@ class PowerMeterTab(QWidget):
             QMessageBox.critical(self, "Logging Error", str(e))
             return
 
+        self._append_table_row(trial, port, injection, output)
+
+        navg = max(len(self._ref_history), len(self._target_history))
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_status_label.setText(
-            f"Logged trial {trial} (port {port}) at {timestamp}"
+            f"Logged trial {trial} (port {port}, avg of {navg} readings) at {timestamp}"
         )
         self.settings.setValue("power_meter/log_port", port)
 
@@ -1065,6 +1269,9 @@ class PowerMeterTab(QWidget):
         # Restore measurement log file if it still exists
         self.port_spin.setValue(
             self.settings.value("power_meter/log_port", defaultValue=1, type=int)
+        )
+        self.log_avg_spin.setValue(
+            self.settings.value("power_meter/log_averaging", defaultValue=10, type=int)
         )
         saved_log = self.settings.value(
             "power_meter/log_file", defaultValue="", type=str

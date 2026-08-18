@@ -71,9 +71,21 @@ Without openpyxl, measurement logging still works but only in CSV format.
   per-port statistics are computed by built-in formulas
 - CSV logs include a timestamp, wavelength, and throughput/loss computed
   at log time
+- Each logged value is the average of the recent display readings (the
+  "Average over" count, default 10) for a more stable measurement
 - Trial numbers auto-increment; the port number is set in the GUI
 - Append to an existing log file to continue a measurement session
+- Logged measurements are shown live in a table beside the controls;
+  selecting an existing log file loads its measurements into the table
 - Works with Freeze: freeze the display, then log the held readings
+
+### Simulated Meters (Testing)
+- The Power Meters tab can run without hardware: when a scan finds no
+  meters, the dialog offers two simulated meters (~2 mW and ~1.5 mW with
+  realistic noise and drift)
+- Set the `MULTILASER_SIM_METERS` environment variable to `1` or `2` to
+  skip the hardware scan entirely (works without pyvisa installed)
+- The status label shows "SIMULATED" while simulated meters are connected
 
 ## Usage Instructions
 
@@ -131,12 +143,17 @@ Click on the "Power Meters" tab in the main application window.
    - **CSV File (.csv)**: plain-text log with computed throughput and loss
 2. Or click "Append to Existing…" to continue an earlier log file
 3. Set the **Port** number for the lantern port being measured
-4. Click "Log Measurement" to record the current readings
+4. Optionally adjust **Average over** — each logged measurement is the
+   average of this many recent display readings (default 10, about 1 s at
+   the default 10 Hz update rate; set to 1 to log single readings)
+5. Click "Log Measurement" to record the averaged readings
    - Injection power = corrected reference power
    - Lantern output power = target power
    - The trial number auto-increments
-5. Optionally use "Freeze" first to hold a reading, then log it
-6. Keep the log file closed in Excel while logging — the file is written on
+   - The measurement appears in the table beside the controls
+6. Optionally use "Freeze" first to hold a reading, then log it (the
+   readings buffered before the freeze are averaged)
+7. Keep the log file closed in Excel while logging — the file is written on
    every logged measurement
 
 ### 10. Disconnect
@@ -159,6 +176,9 @@ Click on the "Power Meters" tab in the main application window.
 - **Note**: The scan only accepts Thorlabs devices (USB vendor ID 0x1313).
   If a meter is attached but not found, check the application log — ignored
   USB instruments are listed there by resource name
+- **Testing without hardware**: the "no devices found" dialog offers
+  simulated meters — answer Yes to test the tab (readings, logging, table)
+  with no meters attached
 
 ### Wrong or Extra Devices Detected
 - **Cause**: Before v0.7.1, any USB VISA instrument on the computer was

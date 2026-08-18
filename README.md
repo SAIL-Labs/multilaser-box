@@ -12,7 +12,7 @@ A Python-based control system for managing multiple lasers through an Arduino mi
 - **Intuitive GUI** - PyQt6-based interface with LED indicators and safety controls
 - **SCPI Protocol** - Industry-standard SCPI commands for professional integration
 - **Dual Power Meter Support** - Optional Thorlabs PM100USB integration (see [Power Meter Guide](docs/power_meter_manual.md))
-- **Measurement Logging** - Log power readings to Excel or CSV with throughput/loss calculations
+- **Measurement Logging** - Log power readings (averaged over the recent display readings) to Excel or CSV with throughput/loss calculations, shown live in a measurements table beside the controls
 - **Safety First** - Emergency stop, single-laser enforcement, automatic shutdown
 - **Cross-Platform** - Works on Windows, macOS, and Linux
 - **Standalone Executables** - Pre-built binaries available (no Python required)
@@ -95,6 +95,21 @@ python -m multilaser.laser_controller_gui
 4. **Monitor status:**
    - LED indicators show ON (green) or OFF (grey)
    - Only one laser can be active at a time (safety feature)
+
+#### Simulated Power Meters (Testing Without Hardware)
+
+To test the Power Meters tab (readings, calibration, measurement logging and
+the measurements table) without any hardware attached:
+
+- Click "Scan for Power Meters" and answer **Yes** when offered simulated
+  meters (the offer appears when no real meters are found), **or**
+- Set the `MULTILASER_SIM_METERS` environment variable to `1` or `2` before
+  launching to skip the hardware scan entirely (works without pyvisa
+  installed).
+
+Simulated meters read ~2 mW (meter 1) and ~1.5 mW (meter 2) with realistic
+noise and slow drift; the status bar shows "SIMULATED" while they are
+connected.
 
 ### Python API
 

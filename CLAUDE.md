@@ -14,6 +14,7 @@ This is a Python-based control system for managing multiple lasers through an Ar
 - **2-second Arduino initialization delay** is required after opening the serial connection before sending commands.
 - **VISA resource strings format the USB vendor ID differently per backend**: NI-VISA uses hex (`USB0::0x1313::...`), pyvisa-py uses decimal (`USB0::4883::...`). The Thorlabs filter in `find_power_meters()` must accept both forms — this mismatch is why the filter was once commented out, which made any USB instrument count as a power meter.
 - **CI builds install unpinned latest pyvisa/pyvisa-py/pyusb**, so two builds of identical source can enumerate USB devices differently (this surfaced the scan bug as a "v0.7.0 regression").
+- **Simulated power meters** (`SimulatedPowerMeter`, resource names starting with `SIM::`) let the Power Meters tab run without hardware or pyvisa: the scan offers them when no real meters are found, or set `MULTILASER_SIM_METERS=1|2`. `PowerMeterController.__init__` deliberately does NOT require pyvisa — only the real scan/connect paths do.
 - **The auto-updater (`updater.py`) never overwrites the running exe** — it downloads the new versioned exe next to the current one, falling back to the user's Downloads folder when the app folder isn't writable (Program Files, read-only shares). The user runs the new exe manually.
 
 ## Key Design Patterns
