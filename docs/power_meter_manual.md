@@ -69,6 +69,13 @@ Without openpyxl, measurement logging still works but only in CSV format.
   measurement adds a row with Trial, Port, injection power (corrected
   reference) and lantern output power (target); throughput, loss and
   per-port statistics are computed by built-in formulas
+- Alternatively, Excel logs can use the **Lantern Test Report** layout:
+  one sheet per wavelength (1550/1310/1064 nm) with a header block
+  (Lantern S/N, PMREF, Launch power) and a port-keyed table (ports 1-19);
+  "Calibrate Now" records the PMREF (uW) and Launch (mW) cells, and each
+  logged measurement writes the target power (mW) and raw reference (uW)
+  into the current port's row — re-logging a port overwrites it. The
+  sheet is chosen by the current wavelength setting
 - CSV logs include a timestamp, wavelength, and throughput/loss computed
   at log time
 - Each logged value is the average of the recent display readings (the
@@ -135,13 +142,20 @@ Click on the "Power Meters" tab in the main application window.
 - All readings update automatically at the configured rate
 
 ### 9. Log Measurements (Optional)
-1. Click "New Log File…" and choose where to save the log
-   - **Excel Workbook (.xlsx)**: generated with the lantern throughput
+1. Click "New Log File…" and choose the format and where to save the log
+   - **Excel Throughput Log (.xlsx)**: generated with the lantern throughput
      worksheet layout, including formulas for throughput, loss and per-port
      statistics; the sheet is named after the current wavelength
      (e.g. `wave_1550`)
+   - **Lantern Test Report (.xlsx)**: generated with the report layout
+     (one sheet per wavelength, ports 1-19); you are prompted for the
+     lantern serial number. Use "Calibrate Now" (with the reference patch
+     cord in the target meter) to record the PMREF/Launch cells, then log
+     each port — measurements go to the sheet matching the current
+     wavelength, and re-logging a port overwrites its row
    - **CSV File (.csv)**: plain-text log with computed throughput and loss
-2. Or click "Append to Existing…" to continue an earlier log file
+2. Or click "Append to Existing…" to continue an earlier log file — the
+   layout of an existing Excel log is detected automatically
 3. Set the **Port** number for the lantern port being measured
 4. Optionally adjust **Average over** — each logged measurement is the
    average of this many recent display readings (default 10, about 1 s at

@@ -12,7 +12,7 @@ A Python-based control system for managing multiple lasers through an Arduino mi
 - **Intuitive GUI** - PyQt6-based interface with LED indicators and safety controls
 - **SCPI Protocol** - Industry-standard SCPI commands for professional integration
 - **Dual Power Meter Support** - Optional Thorlabs PM100USB integration (see [Power Meter Guide](docs/power_meter_manual.md))
-- **Measurement Logging** - Log power readings (averaged over the recent display readings) to Excel or CSV with throughput/loss calculations, shown live in a measurements table beside the controls
+- **Measurement Logging** - Log power readings (averaged over the recent display readings) to Excel or CSV with throughput/loss calculations, shown live in a measurements table beside the controls; Excel logs support the throughput layout or the per-port Lantern Test Report layout
 - **Safety First** - Emergency stop, single-laser enforcement, automatic shutdown
 - **Cross-Platform** - Works on Windows, macOS, and Linux
 - **Standalone Executables** - Pre-built binaries available (no Python required)

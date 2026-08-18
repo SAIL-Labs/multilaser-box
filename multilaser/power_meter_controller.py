@@ -256,6 +256,8 @@ class PowerMeterController:
         self.reference_meter: Optional[PowerMeter] = None
         self.target_meter: Optional[PowerMeter] = None
         self.calibration_factor: float = 1.0
+        # (raw_reference_w, target_w) from the last calibrate_from_measurements
+        self.last_calibration: Optional[Tuple[float, float]] = None
 
         logging.basicConfig(level=logging.INFO)
 
@@ -426,6 +428,7 @@ class PowerMeterController:
 
         factor = target / raw_ref
         self.calibration_factor = factor
+        self.last_calibration = (raw_ref, target)
         logging.info(f"Calibrated: factor = {factor:.6f} (target={target:.6e}, ref={raw_ref:.6e})")
         return factor
 

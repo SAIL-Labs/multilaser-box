@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QCheckBox,
+    QInputDialog,
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
@@ -197,9 +198,11 @@ class PowerMeterTab(QWidget):
         self._last_corrected_ref: Optional[float] = None
         self._last_target_power: Optional[float] = None
         # Rolling buffers of recent displayed readings; logged measurements
-        # are the average of these (see log_measurement)
+        # are the average of these (see log_measurement). The raw reference
+        # buffer feeds report logs, which apply calibration in-sheet.
         self._ref_history: deque = deque(maxlen=10)
         self._target_history: deque = deque(maxlen=10)
+        self._raw_ref_history: deque = deque(maxlen=10)
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update_readings)
 
@@ -608,18 +611,30 @@ class PowerMeterTab(QWidget):
             self.table_summary_label.setText(f"{count} measurement(s)")
 
     def _reload_measurement_table(self):
-        """Rebuild the table from the current log file (empty if none)"""
+        """Rebuild the table from the current log file (empty if none).
+
+        For report logs the rows come from the sheet matching the current
+        wavelength setting.
+        """
         self.measurement_table.setRowCount(0)
         if self.measurement_log is not None:
             try:
                 for trial, port, injection, output in (
-                    self.measurement_log.read_measurements()
+                    self.measurement_log.read_measurements(
+                        wavelength_nm=self.wavelength_spin.value()
+                    )
                 ):
                     self._append_table_row(trial, port, injection, output)
             except MeasurementLogError as e:
                 logging.getLogger(__name__).warning(
                     f"Could not read existing measurements: {e}"
                 )
+        # Report logs are port-keyed, so the Trial column is redundant
+        is_report = (
+            self.measurement_log is not None
+            and self.measurement_log.layout == "report"
+        )
+        self.measurement_table.setColumnHidden(0, is_report)
         self._update_table_summary()
 
     def scan_power_meters(self):
@@ -1027,17 +1042,22 @@ class PowerMeterTab(QWidget):
             """
             )
 
-    def _clear_reading_history(self, ref: bool = True, target: bool = True):
+    def _clear_reading_history(
+        self, ref: bool = True, target: bool = True, raw: bool = True
+    ):
         """Drop buffered readings that no longer reflect the current setup"""
         if ref:
             self._ref_history.clear()
         if target:
             self._target_history.clear()
+        if raw:
+            self._raw_ref_history.clear()
 
     def _on_log_avg_changed(self, value: int):
         """Resize the averaging buffers, keeping the most recent readings"""
         self._ref_history = deque(self._ref_history, maxlen=value)
         self._target_history = deque(self._target_history, maxlen=value)
+        self._raw_ref_history = deque(self._raw_ref_history, maxlen=value)
         self.settings.setValue("power_meter/log_averaging", value)
 
     def _on_calibration_changed(self, value: float):
@@ -1045,7 +1065,8 @@ class PowerMeterTab(QWidget):
         if value > 0:
             self.controller.set_calibration_factor(value)
             # Buffered corrected-reference readings used the old factor
-            self._clear_reading_history(ref=True, target=False)
+            # (raw reference readings are unaffected by the factor)
+            self._clear_reading_history(ref=True, target=False, raw=False)
             # Persist to the active laser's QSettings key
             if self.active_laser_number is not None:
                 self.settings.setValue(
@@ -1066,15 +1087,43 @@ class PowerMeterTab(QWidget):
             self.calibration_spin.setValue(factor)
             self.calibration_spin.blockSignals(False)
             # Buffered corrected-reference readings used the old factor
-            self._clear_reading_history(ref=True, target=False)
+            self._clear_reading_history(ref=True, target=False, raw=False)
             # Persist to the active laser's QSettings key
             self.settings.setValue(
                 f"laser/calibration_factor_{self.active_laser_number}", factor
             )
+            self._record_report_calibration()
         except PowerMeterError as e:
             QMessageBox.critical(
                 self, "Calibration Error", f"Failed to calibrate:\n{str(e)}"
             )
+
+    def _record_report_calibration(self):
+        """Write the calibration readings to an active report log's PMREF/Launch"""
+        if (
+            self.measurement_log is None
+            or self.measurement_log.layout != "report"
+            or self.controller.last_calibration is None
+        ):
+            return
+        raw_ref, target = self.controller.last_calibration
+        try:
+            self.measurement_log.set_report_calibration(
+                wavelength_nm=self.wavelength_spin.value(),
+                pmref_w=raw_ref,
+                launch_w=target,
+            )
+        except MeasurementLogError as e:
+            QMessageBox.critical(
+                self,
+                "Logging Error",
+                f"Failed to record calibration in report:\n{str(e)}",
+            )
+            return
+        self.log_status_label.setText(
+            "Recorded PMREF/Launch calibration in report"
+        )
+        self._reload_measurement_table()
 
     def update_readings(self):
         """Update power readings from both meters"""
@@ -1089,6 +1138,8 @@ class PowerMeterTab(QWidget):
                 self._ref_history.append(corrected_ref)
             if target_power is not None:
                 self._target_history.append(target_power)
+            if raw_ref is not None:
+                self._raw_ref_history.append(raw_ref)
 
             # Show corrected reference as main display
             self.ref_display.update_power(corrected_ref)
@@ -1113,11 +1164,17 @@ class PowerMeterTab(QWidget):
             # Don't pop up error dialogs during continuous reading
             logging.error(f"Error reading power meters: {str(e)}")
 
-    def _log_file_filters(self) -> str:
+    def _log_file_filters(self, for_new: bool = False) -> str:
         """File dialog filters for log files (Excel only when openpyxl available)"""
-        if OPENPYXL_AVAILABLE:
-            return "Excel Workbook (*.xlsx);;CSV File (*.csv)"
-        return "CSV File (*.csv)"
+        if not OPENPYXL_AVAILABLE:
+            return "CSV File (*.csv)"
+        if for_new:
+            return (
+                "Excel Throughput Log (*.xlsx);;"
+                "Lantern Test Report (*.xlsx);;"
+                "CSV File (*.csv)"
+            )
+        return "Excel Workbook (*.xlsx);;CSV File (*.csv)"
 
     def _log_start_dir(self) -> str:
         """Initial directory for log file dialogs"""
@@ -1133,7 +1190,7 @@ class PowerMeterTab(QWidget):
             self,
             "New Measurement Log",
             self._log_start_dir(),
-            self._log_file_filters(),
+            self._log_file_filters(for_new=True),
         )
         if not path:
             return
@@ -1142,9 +1199,25 @@ class PowerMeterTab(QWidget):
         if not Path(path).suffix:
             path += ".csv" if "CSV" in selected_filter else ".xlsx"
 
+        layout = "report" if "Report" in selected_filter else "throughput"
+        serial = None
+        if layout == "report":
+            serial, ok = QInputDialog.getText(
+                self,
+                "Lantern Test Report",
+                "Lantern serial number (optional):",
+            )
+            if not ok:
+                return
+            serial = serial.strip() or None
+
         try:
-            log = MeasurementLogger(path)
-            log.create_new(wavelength_nm=self.wavelength_spin.value())
+            log = MeasurementLogger(path, layout=layout)
+            log.create_new(
+                wavelength_nm=self.wavelength_spin.value(),
+                layout=layout,
+                serial=serial,
+            )
         except MeasurementLogError as e:
             QMessageBox.critical(
                 self, "Logging Error", f"Failed to create log file:\n{str(e)}"
@@ -1225,6 +1298,12 @@ class PowerMeterTab(QWidget):
             )
             return
 
+        raw_reference = (
+            sum(self._raw_ref_history) / len(self._raw_ref_history)
+            if self._raw_ref_history
+            else None
+        )
+
         port = self.port_spin.value()
         try:
             trial = self.measurement_log.append_measurement(
@@ -1232,18 +1311,27 @@ class PowerMeterTab(QWidget):
                 injection_power_w=injection,
                 output_power_w=output,
                 wavelength_nm=self.wavelength_spin.value(),
+                raw_reference_w=raw_reference,
             )
         except MeasurementLogError as e:
             QMessageBox.critical(self, "Logging Error", str(e))
             return
 
-        self._append_table_row(trial, port, injection, output)
-
         navg = max(len(self._ref_history), len(self._target_history))
         timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_status_label.setText(
-            f"Logged trial {trial} (port {port}, avg of {navg} readings) at {timestamp}"
-        )
+        if self.measurement_log.layout == "report":
+            # Port-keyed layout: re-logging a port overwrites its row, so
+            # rebuild the table from the file instead of appending
+            self._reload_measurement_table()
+            self.log_status_label.setText(
+                f"Logged port {port} (avg of {navg} readings) at {timestamp}"
+            )
+        else:
+            self._append_table_row(trial, port, injection, output)
+            self.log_status_label.setText(
+                f"Logged trial {trial} (port {port}, avg of {navg} readings) "
+                f"at {timestamp}"
+            )
         self.settings.setValue("power_meter/log_port", port)
 
     def load_settings(self):
@@ -1303,9 +1391,15 @@ class PowerMeterTab(QWidget):
                     "power_meter/target_resource", meters[target_idx].resource_name
                 )
 
+    def _on_wavelength_changed(self):
+        """Reload the table when the wavelength selects a different report sheet"""
+        if self.measurement_log is not None and self.measurement_log.layout == "report":
+            self._reload_measurement_table()
+
     def connect_settings_signals(self):
         """Connect widget change signals to save_settings (after initial load)"""
         self.wavelength_spin.valueChanged.connect(self.save_settings)
+        self.wavelength_spin.valueChanged.connect(self._on_wavelength_changed)
         self.averaging_spin.valueChanged.connect(self.save_settings)
         self.update_rate_spin.valueChanged.connect(self.save_settings)
         # calibration_spin saves per-laser in _on_calibration_changed()

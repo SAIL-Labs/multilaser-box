@@ -9,7 +9,7 @@ This is a Python-based control system for managing multiple lasers through an Ar
 
 ## Non-Obvious Gotchas
 
-- **Excel log template:** `MeasurementLogger` generates Excel logs programmatically with the lantern throughput worksheet layout (Trial / Port / injection power / lantern output power in columns A-D, formulas for throughput, loss and per-port statistics). The layout matches the SAIL `throughput_new.xlsx` template, which is **intentionally NOT bundled** — it lives on the team OneDrive.
+- **Excel log templates:** `MeasurementLogger` generates Excel logs programmatically in two layouts, both matching SAIL templates that are **intentionally NOT bundled** (they live on the team OneDrive): the throughput layout (`throughput_new.xlsx`: Trial / Port / injection / output in columns A-D, appended per trial) and the Lantern Test Report layout (`Lantern_Test_Report.xlsx`: one sheet per wavelength, port-keyed rows 22-40 for ports 1-19, PMREF/Launch calibration cells B17/B18). Report logs record the **raw** reference (µW) in column D — calibration is applied in-sheet via `Launch*(Ref/PMREF)` — unlike throughput logs which record the corrected reference.
 - **openpyxl is an optional dependency** — CSV logging must keep working without it.
 - **2-second Arduino initialization delay** is required after opening the serial connection before sending commands.
 - **VISA resource strings format the USB vendor ID differently per backend**: NI-VISA uses hex (`USB0::0x1313::...`), pyvisa-py uses decimal (`USB0::4883::...`). The Thorlabs filter in `find_power_meters()` must accept both forms — this mismatch is why the filter was once commented out, which made any USB instrument count as a power meter.
