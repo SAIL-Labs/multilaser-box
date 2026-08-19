@@ -12,6 +12,8 @@ Date: 2025-12-08
 
 import logging
 import math
+import os
+import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -36,8 +38,11 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
     QHeaderView,
     QAbstractItemView,
+    QProgressBar,
+    QLineEdit,
+    QProgressDialog,
 )
-from PyQt6.QtCore import Qt, QTimer, QSettings
+from PyQt6.QtCore import Qt, QTimer, QSettings, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 from typing import Optional
 
@@ -53,6 +58,8 @@ from multilaser.measurement_logger import (
     OPENPYXL_AVAILABLE,
     REPORT_MAX_PORTS,
 )
+from multilaser import airtable_sync
+from multilaser.airtable_sync import AirtableSyncError
 
 
 class MeterSelectionDialog(QDialog):
@@ -96,6 +103,27 @@ class MeterSelectionDialog(QDialog):
         count = len(self.selected_resources())
         ok_button = self._buttons.button(QDialogButtonBox.StandardButton.Ok)
         ok_button.setEnabled(1 <= count <= self.MAX_SELECTED)
+
+
+class _AirtableWorker(QThread):
+    """Runs one Airtable call off the GUI thread.
+
+    Emits finished_ok(result) or failed(exception); the GUI thread keeps
+    its event loop running (progress dialog, no macOS spinning wheel).
+    """
+
+    finished_ok = pyqtSignal(object)
+    failed = pyqtSignal(object)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+
+    def run(self):
+        try:
+            self.finished_ok.emit(self._fn())
+        except Exception as e:
+            self.failed.emit(e)
 
 
 class PowerDisplay(QWidget):
@@ -198,12 +226,21 @@ class PowerMeterTab(QWidget):
         self.measurement_log: Optional[MeasurementLogger] = None
         self._last_corrected_ref: Optional[float] = None
         self._last_target_power: Optional[float] = None
-        # Rolling buffers of recent displayed readings; logged measurements
-        # are the average of these (see log_measurement). The raw reference
-        # buffer feeds report logs, which apply calibration in-sheet.
+        # Buffers of readings collected after Log Measurement is pressed;
+        # the logged values are the average of these (see log_measurement).
+        # Cleared at the start of each collection so stale readings from
+        # before the button press (fiber moves, previous port) never
+        # contaminate the average. The raw reference buffer feeds report
+        # logs, which apply calibration in-sheet.
         self._ref_history: deque = deque(maxlen=10)
         self._target_history: deque = deque(maxlen=10)
         self._raw_ref_history: deque = deque(maxlen=10)
+        # Number of readings still to collect for the pending log entry,
+        # or None when no collection is in progress
+        self._log_collect_target: Optional[int] = None
+        # Guards against the row-click and spinner handlers re-triggering
+        # each other (click selects row -> sets spinner -> would re-select)
+        self._syncing_port_selection = False
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update_readings)
 
@@ -218,7 +255,10 @@ class PowerMeterTab(QWidget):
         main_layout.setContentsMargins(20, 20, 20, 20)
 
         # === Connection Section ===
-        connection_group = QGroupBox("Power Meter Connection")
+        # Kept as an attribute: the Settings tab re-parents this group
+        # (and role_group) into itself when present
+        self.connection_group = QGroupBox("Power Meter Connection")
+        connection_group = self.connection_group
         connection_layout = QVBoxLayout()
 
         # Scan and connect row
@@ -263,7 +303,8 @@ class PowerMeterTab(QWidget):
         main_layout.addWidget(connection_group)
 
         # === Role Assignment Section ===
-        role_group = QGroupBox("Role Assignment")
+        self.role_group = QGroupBox("Role Assignment")
+        role_group = self.role_group
         role_layout = QHBoxLayout()
 
         role_layout.addWidget(QLabel("Reference Meter:"))
@@ -446,6 +487,17 @@ class PowerMeterTab(QWidget):
         self.open_log_btn.clicked.connect(self.open_log_file)
         file_row.addWidget(self.open_log_btn)
 
+        self.push_airtable_btn = QPushButton("Push to Airtable")
+        self.push_airtable_btn.setToolTip(
+            "Upload this Lantern Test Report to the SAIL Airtable\n"
+            "(Lantern Manufacture base): upserts the Throughput Test and\n"
+            "per-port measurements for the current wavelength sheet.\n"
+            "Safe to re-run — existing records are updated, not duplicated."
+        )
+        self.push_airtable_btn.setEnabled(False)
+        self.push_airtable_btn.clicked.connect(self.push_to_airtable)
+        file_row.addWidget(self.push_airtable_btn)
+
         self.log_file_label = QLabel("No log file selected")
         self.log_file_label.setStyleSheet("color: #7f8c8d; font-style: italic;")
         file_row.addWidget(self.log_file_label)
@@ -476,8 +528,9 @@ class PowerMeterTab(QWidget):
         self.log_avg_spin.setValue(10)
         self.log_avg_spin.setSuffix(" readings")
         self.log_avg_spin.setToolTip(
-            "Each logged measurement is the average of this many recent\n"
-            "display readings (at the current update rate)"
+            "Each logged measurement is the average of this many fresh\n"
+            "readings collected after pressing Log Measurement\n"
+            "(at the current update rate)"
         )
         self.log_avg_spin.valueChanged.connect(self._on_log_avg_changed)
         log_row.addWidget(self.log_avg_spin)
@@ -489,8 +542,9 @@ class PowerMeterTab(QWidget):
         self.log_btn.setMinimumHeight(40)
         self.log_btn.setEnabled(False)
         self.log_btn.setToolTip(
-            "Record the average of the recent readings to the log file:\n"
-            "injection power = corrected reference, output power = target"
+            "Collect fresh readings, then record their average to the log file:\n"
+            "injection power = corrected reference, output power = target.\n"
+            "When frozen, the readings held from before the freeze are logged."
         )
         self.log_btn.clicked.connect(self.log_measurement)
         self.log_btn.setStyleSheet(
@@ -512,6 +566,16 @@ class PowerMeterTab(QWidget):
         """
         )
         log_row.addWidget(self.log_btn)
+
+        # Progress of the reading collection triggered by Log Measurement
+        self.log_progress = QProgressBar()
+        self.log_progress.setRange(0, self.log_avg_spin.value())
+        self.log_progress.setValue(0)
+        self.log_progress.setTextVisible(True)
+        self.log_progress.setFormat("%v / %m readings")
+        self.log_progress.setMaximumWidth(160)
+        self.log_progress.setVisible(False)
+        log_row.addWidget(self.log_progress)
 
         self.log_status_label = QLabel("")
         self.log_status_label.setStyleSheet("color: #27ae60;")
@@ -567,6 +631,10 @@ class PowerMeterTab(QWidget):
         )
         self.measurement_table.setAlternatingRowColors(True)
         self.measurement_table.verticalHeader().setVisible(False)
+        self.measurement_table.setToolTip(
+            "Click a row to set the Port spinner to that row's port"
+        )
+        self.measurement_table.cellClicked.connect(self._on_measurement_row_clicked)
         header = self.measurement_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.measurement_table)
@@ -615,6 +683,56 @@ class PowerMeterTab(QWidget):
         self.measurement_table.scrollToBottom()
         self._update_table_summary()
 
+    def _on_measurement_row_clicked(self, row: int, column: int):
+        """Set the Port spinner to the port of the clicked table row"""
+        item = self.measurement_table.item(row, 1)  # Port column
+        if item is None:
+            return
+        try:
+            port = int(item.text())
+        except ValueError:
+            return
+        if self.port_spin.minimum() <= port <= self.port_spin.maximum():
+            # The clicked row is already selected; don't let the spinner
+            # handler jump the selection (e.g. to a later duplicate port)
+            self._syncing_port_selection = True
+            try:
+                self.port_spin.setValue(port)
+            finally:
+                self._syncing_port_selection = False
+            self.log_status_label.setText(f"Port set to {port} from selected row")
+
+    def _find_port_row(self, port: int) -> Optional[int]:
+        """Return the last (most recent) table row for a port, or None"""
+        for row in range(self.measurement_table.rowCount() - 1, -1, -1):
+            item = self.measurement_table.item(row, 1)  # Port column
+            if item is not None and item.text() == str(port):
+                return row
+        return None
+
+    def _sync_port_row_selection(self) -> Optional[int]:
+        """Select the table row matching the Port spinner (clear if none)"""
+        row = self._find_port_row(self.port_spin.value())
+        if row is not None:
+            self.measurement_table.selectRow(row)
+        else:
+            self.measurement_table.clearSelection()
+        return row
+
+    def _on_port_spin_changed(self, port: int):
+        """Follow spinner changes: highlight the port's row, refresh the hint"""
+        if self._syncing_port_selection:
+            return
+        row = self._sync_port_row_selection()
+        # Keep an on-screen "Port set to …" hint from going stale; other
+        # status messages (logging progress etc.) are left alone
+        if self.log_status_label.text().startswith("Port set to"):
+            self.log_status_label.setText(
+                f"Port set to {port} (row selected)"
+                if row is not None
+                else f"Port set to {port}"
+            )
+
     def _update_table_summary(self):
         count = self.measurement_table.rowCount()
         if count == 0:
@@ -650,6 +768,7 @@ class PowerMeterTab(QWidget):
         self.measurement_table.setColumnHidden(0, is_report)
         self.measurement_table.setColumnHidden(2, not is_report)
         self._update_table_summary()
+        self._sync_port_row_selection()
 
     def scan_power_meters(self):
         """Scan for available power meters"""
@@ -713,8 +832,37 @@ class PowerMeterTab(QWidget):
         else:
             self.disconnect_meters()
 
-    def connect_meters(self):
-        """Connect to the power meters"""
+    def try_auto_connect(self) -> bool:
+        """Connect to the last-used meters without scanning (startup).
+
+        Runs only when the auto-connect setting is on and saved resource
+        names exist; failures are quiet (status label, no dialog) since
+        this fires at startup. Returns True when connected.
+        """
+        if not self.settings.value(
+            "power_meter/auto_connect", defaultValue=True, type=bool
+        ):
+            return False
+        if self.controller.get_power_meters():
+            return False  # already connected
+        resources = [
+            r
+            for r in (self._saved_ref_resource, self._saved_target_resource)
+            if r
+        ]
+        resources = list(dict.fromkeys(resources))  # dedup, keep order
+        if not resources:
+            return False
+        self.available_meters = resources
+        self.connect_meters(quiet=True)
+        return bool(self.controller.get_power_meters())
+
+    def connect_meters(self, quiet: bool = False):
+        """Connect to the power meters.
+
+        With quiet=True (startup auto-connect) failures go to the status
+        label instead of a dialog.
+        """
         try:
             self.controller.connect_power_meters(self.available_meters)
 
@@ -830,9 +978,22 @@ class PowerMeterTab(QWidget):
             self.update_timer.start()
 
         except PowerMeterError as e:
-            QMessageBox.critical(
-                self, "Connection Error", f"Failed to connect to power meters:\n{str(e)}"
-            )
+            # Don't stay half-connected if only one of two meters opened
+            self.controller.disconnect_all()
+            if quiet:
+                logging.getLogger(__name__).warning(f"Auto-connect failed: {e}")
+                self.status_label.setText(
+                    "Auto-connect failed — scan for power meters"
+                )
+                self.status_label.setStyleSheet(
+                    "color: #e67e22; font-weight: bold;"
+                )
+            else:
+                QMessageBox.critical(
+                    self,
+                    "Connection Error",
+                    f"Failed to connect to power meters:\n{str(e)}",
+                )
 
     def disconnect_meters(self):
         """Disconnect from the power meters"""
@@ -871,6 +1032,7 @@ class PowerMeterTab(QWidget):
 
         self._last_corrected_ref = None
         self._last_target_power = None
+        self._cancel_log_collection()
         self._clear_reading_history()
         self._update_log_controls()
 
@@ -1037,7 +1199,9 @@ class PowerMeterTab(QWidget):
             self.update_timer_rate()
             self.update_timer.start()
         else:
-            # Freeze: stop timer, hold current values
+            # Freeze: stop timer, hold current values. A pending log
+            # collection can't finish without the timer, so cancel it.
+            self._cancel_log_collection("Measurement cancelled (display frozen)")
             self.frozen = True
             self.update_timer.stop()
             self.freeze_btn.setText("Unfreeze")
@@ -1072,6 +1236,11 @@ class PowerMeterTab(QWidget):
         self._ref_history = deque(self._ref_history, maxlen=value)
         self._target_history = deque(self._target_history, maxlen=value)
         self._raw_ref_history = deque(self._raw_ref_history, maxlen=value)
+        if self._log_collect_target is not None:
+            # Keep an in-progress collection consistent with the new count
+            # (a target above the buffer size could never be reached)
+            self._log_collect_target = value
+            self.log_progress.setRange(0, value)
         self.settings.setValue("power_meter/log_averaging", value)
 
     def _on_calibration_changed(self, value: float):
@@ -1165,6 +1334,9 @@ class PowerMeterTab(QWidget):
             if raw_ref is not None:
                 self._raw_ref_history.append(raw_ref)
 
+            # Advance a pending Log Measurement collection
+            self._log_collection_progress()
+
             # Show corrected reference as main display
             self.ref_display.update_power(corrected_ref)
             self.target_display.update_power(target_power)
@@ -1200,21 +1372,92 @@ class PowerMeterTab(QWidget):
             )
         return "Excel Workbook (*.xlsx);;CSV File (*.csv)"
 
+    def _default_log_dir(self) -> str:
+        """The configured default save folder, or "" if unset/missing.
+
+        The folder is chosen per computer (e.g. the OneDrive "Lantern
+        Data" folder, whose path varies between machines).
+        """
+        path = self.settings.value(
+            "power_meter/default_log_dir", defaultValue="", type=str
+        )
+        if path and Path(path).is_dir():
+            return path
+        return ""
+
     def _log_start_dir(self) -> str:
-        """Initial directory for log file dialogs"""
+        """Initial directory for log file dialogs.
+
+        The configured default folder wins when set; otherwise the active
+        log's folder, then the last-used folder, then home.
+        """
+        default_dir = self._default_log_dir()
+        if default_dir:
+            return default_dir
         if self.measurement_log is not None:
             return str(self.measurement_log.file_path.parent)
         return self.settings.value(
             "power_meter/log_dir", defaultValue=str(Path.home()), type=str
         )
 
-    def new_log_file(self):
-        """Create a new measurement log file (Excel from template, or CSV)"""
-        path, selected_filter = QFileDialog.getSaveFileName(
+    def _prompt_log_type(self):
+        """Ask which kind of log to create; returns (filter string, ok).
+
+        Skipped (returning the CSV filter) when openpyxl is unavailable,
+        since CSV is then the only choice.
+        """
+        choices = self._log_file_filters(for_new=True).split(";;")
+        if len(choices) == 1:
+            return choices[0], True
+        # Lantern Test Report is the usual workflow, so preselect it
+        default = next(
+            (i for i, c in enumerate(choices) if "Report" in c), 0
+        )
+        choice, ok = QInputDialog.getItem(
             self,
             "New Measurement Log",
-            self._log_start_dir(),
-            self._log_file_filters(for_new=True),
+            "Log type:",
+            choices,
+            default,
+            False,  # not editable
+        )
+        return choice, ok
+
+    def new_log_file(self):
+        """Create a new measurement log file (Excel from template, or CSV).
+
+        For Lantern Test Reports the device is paired first (serial picked
+        from the Airtable Devices list, or typed in), and only then is the
+        file location chosen — with a filename suggested from the serial.
+        """
+        selected_filter, ok = self._prompt_log_type()
+        if not ok:
+            return
+        layout = "report" if "Report" in selected_filter else "throughput"
+
+        # Pair the device before any file dialog so the report is tied to
+        # a known lantern from the start (and can name the file)
+        serial = None
+        suggested_name = ""
+        if layout == "report":
+            serial, ok = self._prompt_report_serial()
+            if not ok:
+                return
+            date_tag = datetime.now().strftime("%Y%m%d")
+            suggested_name = (
+                f"{serial}_Lantern_Test_Report_{date_tag}.xlsx"
+                if serial
+                else f"Lantern_Test_Report_{date_tag}.xlsx"
+            )
+
+        start = self._log_start_dir()
+        if suggested_name:
+            start = str(Path(start) / suggested_name)
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "New Measurement Log",
+            start,
+            selected_filter,
         )
         if not path:
             return
@@ -1222,18 +1465,6 @@ class PowerMeterTab(QWidget):
         # Add extension if the user didn't type one
         if not Path(path).suffix:
             path += ".csv" if "CSV" in selected_filter else ".xlsx"
-
-        layout = "report" if "Report" in selected_filter else "throughput"
-        serial = None
-        if layout == "report":
-            serial, ok = QInputDialog.getText(
-                self,
-                "Lantern Test Report",
-                "Lantern serial number (optional):",
-            )
-            if not ok:
-                return
-            serial = serial.strip() or None
 
         try:
             log = MeasurementLogger(path, layout=layout)
@@ -1249,6 +1480,262 @@ class PowerMeterTab(QWidget):
             return
 
         self._set_log_file(log)
+
+    # === Airtable integration ===
+
+    def _airtable_pat(self, prompt_if_missing: bool = True) -> Optional[str]:
+        """Return the Airtable PAT (env var > QSettings > prompt).
+
+        The MULTILASER_AIRTABLE_PAT environment variable takes precedence;
+        otherwise the token entered previously is reused from QSettings.
+        Prompting stores the entered token for next time.
+        """
+        pat = os.environ.get("MULTILASER_AIRTABLE_PAT", "").strip()
+        if pat:
+            return pat
+        pat = self.settings.value("airtable/pat", defaultValue="", type=str).strip()
+        if pat or not prompt_if_missing:
+            return pat or None
+
+        pat, ok = QInputDialog.getText(
+            self,
+            "Airtable Access Token",
+            "Paste an Airtable personal access token (PAT) scoped to\n"
+            "data.records:read/write on the Lantern Manufacture base.\n"
+            "It is stored in this app's settings for next time:",
+            QLineEdit.EchoMode.Password,
+        )
+        pat = pat.strip() if ok else ""
+        if not pat:
+            return None
+        self.settings.setValue("airtable/pat", pat)
+        return pat
+
+    def _forget_airtable_pat(self):
+        """Drop a stored PAT that Airtable rejected"""
+        self.settings.setValue("airtable/pat", "")
+
+    def _run_airtable_task(self, fn, message: str):
+        """Run an Airtable call on a worker thread behind a progress dialog.
+
+        Shows a modal, indeterminate QProgressDialog so the GUI event loop
+        keeps running (no beachball) while the network request is in
+        flight. Returns (result, error): exactly one is non-None, error
+        being the exception raised by fn.
+        """
+        dialog = QProgressDialog(message, "", 0, 0, self)  # 0,0 = busy bar
+        dialog.setCancelButton(None)  # requests time out; no partial cancels
+        dialog.setWindowTitle("Airtable")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setMinimumDuration(0)
+
+        outcome = {}
+
+        def on_ok(result):
+            outcome["result"] = result
+            dialog.accept()
+
+        def on_failed(error):
+            outcome["error"] = error
+            dialog.accept()
+
+        worker = _AirtableWorker(fn, self)
+        worker.finished_ok.connect(on_ok)
+        worker.failed.connect(on_failed)
+        worker.start()
+        dialog.exec()
+        worker.wait()
+        worker.deleteLater()
+        return outcome.get("result"), outcome.get("error")
+
+    def _handle_airtable_error(self, error, title: str, suffix: str = ""):
+        """Show an Airtable error, forgetting a rejected stored token"""
+        if isinstance(error, AirtableSyncError) and error.status in (401, 403):
+            self._forget_airtable_pat()
+        QMessageBox.warning(self, title, f"{str(error)}{suffix}")
+
+    # Serial lists change rarely (new lanterns); reuse for 10 minutes so
+    # repeated report creation doesn't hit the network every time
+    DEVICE_CACHE_TTL_S = 600
+
+    def _cached_device_serials(self):
+        """Return (serials or None, age in seconds) from the settings cache"""
+        raw = self.settings.value(
+            "airtable/device_serials", defaultValue="", type=str
+        )
+        fetched_at = self.settings.value(
+            "airtable/device_serials_time", defaultValue=0.0, type=float
+        )
+        serials = [s for s in raw.split("\n") if s] if raw else None
+        return serials, time.time() - fetched_at
+
+    def _fetch_device_serials(self) -> Optional[list]:
+        """Get lantern serials from Airtable, or None if unavailable.
+
+        A recently fetched list is reused from the settings cache without
+        touching the network; on a failed fetch an older cached list is
+        used instead of failing. Shows a warning (and forgets a rejected
+        stored token) only when there is no cache to fall back on, so the
+        caller can offer manual entry.
+        """
+        cached, age = self._cached_device_serials()
+        if cached is not None and age < self.DEVICE_CACHE_TTL_S:
+            return cached
+
+        pat = self._airtable_pat()
+        if not pat:
+            return cached  # possibly stale, still better than typing blind
+
+        serials, error = self._run_airtable_task(
+            lambda: airtable_sync.list_device_serials(pat),
+            "Fetching device list from Airtable…",
+        )
+        if error is not None:
+            if cached is not None:
+                logging.getLogger(__name__).warning(
+                    f"Device list fetch failed, using cached list: {error}"
+                )
+                self.log_status_label.setText(
+                    "Airtable unavailable — using cached device list"
+                )
+                return cached
+            self._handle_airtable_error(
+                error,
+                "Airtable Unavailable",
+                "\n\nEnter the serial number manually instead.",
+            )
+            return None
+
+        self.settings.setValue("airtable/device_serials", "\n".join(serials))
+        self.settings.setValue("airtable/device_serials_time", time.time())
+        return serials
+
+    def _prompt_report_serial(self):
+        """Pair the report to a lantern device before creating the file.
+
+        Offers the known device serials from Airtable in an editable list,
+        so a serial not (yet) in Airtable can still be typed in; with no
+        Airtable access it falls back to plain entry. Returns
+        (serial or None, ok): ok is False when the user cancelled, and a
+        blank serial (None) leaves the report unpaired.
+        """
+        serials = self._fetch_device_serials()
+        if serials:
+            # Leading blank allows creating an unpaired report
+            serial, ok = QInputDialog.getItem(
+                self,
+                "Pair Lantern Device",
+                "Lantern to test (serials from Airtable Devices;\n"
+                "type to override, leave blank for none):",
+                [""] + serials,
+                0,
+                True,  # editable
+            )
+        else:
+            serial, ok = QInputDialog.getText(
+                self,
+                "Pair Lantern Device",
+                "Lantern serial number (optional):",
+            )
+        if not ok:
+            return None, False
+        return serial.strip() or None, True
+
+    def push_to_airtable(self):
+        """Push the current wavelength sheet of the report log to Airtable"""
+        if self.measurement_log is None or self.measurement_log.layout != "report":
+            return
+
+        try:
+            data = self.measurement_log.read_report_export(
+                wavelength_nm=self.wavelength_spin.value()
+            )
+        except MeasurementLogError as e:
+            QMessageBox.critical(self, "Airtable Push Error", str(e))
+            return
+
+        if not data["serial"]:
+            QMessageBox.warning(
+                self,
+                "No Serial Number",
+                "This report has no lantern serial number (cell B1), which "
+                "Airtable needs to identify the device and measurements.\n\n"
+                "Create the report with a serial, or add it to B1 in Excel.",
+            )
+            return
+        if not data["ports"]:
+            QMessageBox.warning(
+                self,
+                "Nothing to Push",
+                "No measured ports found on this wavelength's sheet.",
+            )
+            return
+        if not data["pmref_uw"] or not data["launch_mw"]:
+            QMessageBox.warning(
+                self,
+                "Missing Calibration",
+                "PMREF/Launch are not recorded on this wavelength's sheet.\n"
+                "Use \"Calibrate Now\" first — Airtable computes insertion "
+                "loss from them.",
+            )
+            return
+
+        wavelength = data["wavelength_nm"]
+        reply = QMessageBox.question(
+            self,
+            "Push to Airtable",
+            f"Push {len(data['ports'])} port measurement(s) for lantern "
+            f"{data['serial']}"
+            + (f" at {wavelength:g} nm" if wavelength else "")
+            + " to the SAIL Airtable?\n\n"
+            "Existing records for this report are updated, not duplicated.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        pat = self._airtable_pat()
+        if not pat:
+            return
+
+        result, error = self._run_airtable_task(
+            lambda: airtable_sync.push_report(
+                pat,
+                filename=data["filename"],
+                serial=data["serial"],
+                wavelength_nm=wavelength,
+                pmref_uw=data["pmref_uw"],
+                launch_mw=data["launch_mw"],
+                ports=data["ports"],
+            ),
+            f"Pushing {len(data['ports'])} measurement(s) for "
+            f"{data['serial']} to Airtable…",
+        )
+        if error is not None:
+            self._handle_airtable_error(error, "Airtable Push Error")
+            return
+
+        label = (
+            f"Created {result['test_id']}" if result["created"]
+            else "Updated existing test"
+        )
+        summary = (
+            f"{label} for {data['serial']}: {result['n_ports']} ports, "
+            f"mean IL {result['mean_il_db']:.3f} dB, "
+            f"worst P{result['worst_port']:02d}"
+        )
+        self.log_status_label.setText(f"Airtable: {label.lower()}")
+        if result["device_linked"]:
+            QMessageBox.information(self, "Airtable Push Complete", summary)
+        else:
+            QMessageBox.warning(
+                self,
+                "Airtable Push Complete",
+                summary
+                + f"\n\nWARNING: no Device with UUID PL-{data['serial']} was "
+                "found, so the test record is not linked to a device.",
+            )
 
     def open_log_file(self):
         """Select an existing log file to append measurements to"""
@@ -1271,6 +1758,7 @@ class PowerMeterTab(QWidget):
 
     def _set_log_file(self, log: Optional[MeasurementLogger]):
         """Set the active log file and update UI/settings"""
+        self._cancel_log_collection()
         self.measurement_log = log
         if log is not None:
             self.log_file_label.setText(log.file_path.name)
@@ -1328,14 +1816,113 @@ class PowerMeterTab(QWidget):
         """Enable the log button only when connected with a log file selected"""
         connected = bool(self.controller.get_power_meters())
         self.log_btn.setEnabled(connected and self.measurement_log is not None)
+        # Pushing works from the file alone — no meters needed
+        self.push_airtable_btn.setEnabled(
+            self.measurement_log is not None
+            and self.measurement_log.layout == "report"
+        )
 
     def log_measurement(self):
-        """Record the averaged recent readings to the measurement log.
+        """Collect fresh readings, then log their average.
+
+        Pressing the button clears the reading buffers and collects the
+        next "Average over" readings; only values measured after the press
+        are averaged, so readings taken while fibers were being moved can't
+        drag the logged value down. Pressing again during collection
+        cancels it. When frozen, the readings held from before the freeze
+        are logged immediately instead (no fresh readings are available).
+        """
+        if self.measurement_log is None:
+            return
+
+        if self._log_collect_target is not None:
+            self._cancel_log_collection("Measurement cancelled")
+            return
+
+        if not self._confirm_port_overwrite():
+            return
+
+        if self.frozen:
+            # Timer is stopped: log the readings held from before the freeze
+            self._write_measurement()
+            return
+
+        # Start collecting fresh readings; update_readings() finishes the
+        # log once enough have arrived
+        self._clear_reading_history()
+        self._log_collect_target = self.log_avg_spin.value()
+        self.log_progress.setRange(0, self._log_collect_target)
+        self.log_progress.setValue(0)
+        self.log_progress.setVisible(True)
+        self.log_btn.setText("Cancel")
+        self.log_status_label.setText(
+            f"Measuring... 0/{self._log_collect_target} readings"
+        )
+
+    def _confirm_port_overwrite(self) -> bool:
+        """Warn before overwriting an already-logged report port.
+
+        Report logs are port-keyed, so logging a port again replaces its
+        row. Returns True to proceed (always for throughput/CSV logs,
+        which append instead of overwriting).
+        """
+        port = self.port_spin.value()
+        try:
+            exists = self.measurement_log.has_port_measurement(
+                port, wavelength_nm=self.wavelength_spin.value()
+            )
+        except MeasurementLogError:
+            # Can't inspect the file (e.g. open in Excel); proceed and let
+            # append_measurement report the error properly
+            return True
+        if not exists:
+            return True
+
+        reply = QMessageBox.question(
+            self,
+            "Overwrite Measurement",
+            f"Port {port} already has a measurement on this wavelength's "
+            "sheet.\n\nOverwrite it with a new measurement?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
+    def _log_collection_progress(self):
+        """Track reading collection after Log Measurement; log when done"""
+        if self._log_collect_target is None:
+            return
+        have = max(
+            len(self._ref_history),
+            len(self._target_history),
+            len(self._raw_ref_history),
+        )
+        target = self._log_collect_target
+        self.log_progress.setValue(min(have, target))
+        if have >= target:
+            self._reset_log_collection_ui()
+            self._write_measurement()
+        else:
+            self.log_status_label.setText(f"Measuring... {have}/{target} readings")
+
+    def _reset_log_collection_ui(self):
+        """Restore the logging controls after collection ends"""
+        self._log_collect_target = None
+        self.log_progress.setVisible(False)
+        self.log_btn.setText("Log Measurement")
+
+    def _cancel_log_collection(self, message: str = ""):
+        """Abort an in-progress reading collection without logging"""
+        if self._log_collect_target is None:
+            return
+        self._reset_log_collection_ui()
+        self.log_status_label.setText(message)
+
+    def _write_measurement(self):
+        """Write the averaged buffered readings to the measurement log.
 
         Injection power = corrected reference power, lantern output power =
-        target power. Each value is the average of the buffered recent
-        display readings (up to the "Average over" count). When frozen, the
-        readings buffered before the freeze are logged.
+        target power. Each value is the average of the buffered readings.
         """
         if self.measurement_log is None:
             return
@@ -1470,6 +2057,7 @@ class PowerMeterTab(QWidget):
         # calibration_spin saves per-laser in _on_calibration_changed()
         self.ref_combo.currentIndexChanged.connect(self.save_settings)
         self.target_combo.currentIndexChanged.connect(self.save_settings)
+        self.port_spin.valueChanged.connect(self._on_port_spin_changed)
 
     def cleanup(self):
         """Clean up resources when closing"""

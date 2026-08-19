@@ -74,19 +74,65 @@ Without openpyxl, measurement logging still works but only in CSV format.
   (Lantern S/N, PMREF, Launch power) and a port-keyed table (ports 1-19);
   "Calibrate Now" records the PMREF (uW) and Launch (mW) cells, and each
   logged measurement writes the target power (mW) and raw reference (uW)
-  into the current port's row — re-logging a port overwrites it. The
-  sheet is chosen by the current wavelength setting
+  into the current port's row — re-logging a port overwrites it (after
+  a confirmation). The sheet is chosen by the current wavelength setting
 - CSV logs include a timestamp, wavelength, and throughput/loss computed
   at log time
-- Each logged value is the average of the recent display readings (the
-  "Average over" count, default 10) for a more stable measurement
+- Each logged value is the average of fresh readings collected after
+  "Log Measurement" is pressed (the "Average over" count, default 10);
+  a progress bar shows the collection, and only values measured after
+  the press are averaged, so readings taken while fibers were being
+  moved never contaminate the logged value
 - Trial numbers auto-increment; the port number is set in the GUI
 - Append to an existing log file to continue a measurement session
+- The default save folder for log files is set on the **Settings tab**
+  (e.g. the Lantern Data folder on OneDrive, whose location varies per
+  computer); when set, all log file dialogs start there
 - Logged measurements are shown live in a table beside the controls;
-  selecting an existing log file loads its measurements into the table.
+  selecting an existing log file loads its measurements into the table,
+  and clicking a row sets the Port spinner to that row's port (handy for
+  re-measuring a port).
   For report logs the table is port-keyed and shows both the recorded raw
   reference reading and the calculated injection power (Launch × Ref/PMREF)
 - Works with Freeze: freeze the display, then log the held readings
+
+### Airtable Integration (Lantern Test Reports)
+- Creating a Lantern Test Report starts by pairing it to a device: the
+  prompt offers the known lantern serials from the SAIL Airtable
+  (Devices table, UUID `PL-{serial}`) before the save location is
+  chosen, and the suggested filename is built from the serial. The list
+  is editable so a new serial can still be typed in; without Airtable
+  access it falls back to plain text entry
+- **Push to Airtable** uploads the current wavelength sheet of the
+  active report log directly to the Lantern Manufacture base — the same
+  ingest as the "Ingest Lantern Test Report" Office Script: it upserts
+  one Throughput Tests record (keyed on the report filename; a TT-number
+  is minted for new reports) and one Port Measurements record per
+  measured port (keyed on `{serial}-P{port}`), linking the Device via
+  its UUID. Raw powers only are written — insertion loss and %
+  throughput are live Airtable formulas — while median IL, port std and
+  worst port are computed at push time. Re-pushing updates the existing
+  records rather than duplicating them
+- Requires an Airtable personal access token (PAT) scoped to
+  data.records:read/write on the Lantern Manufacture base. You are
+  prompted for it on first use and it is stored in the app's settings
+  (plain text, like the Office Script's copy); set the
+  `MULTILASER_AIRTABLE_PAT` environment variable to override. A token
+  rejected by Airtable is forgotten so the next attempt re-prompts
+
+### Settings Tab
+- Power meter **connection** (scan/connect) and **role assignment** live
+  on the Settings tab, keeping the Power Meters tab focused on
+  measurement
+- **Auto-connect at startup** (on by default): the app connects directly
+  to the meters used last time — by their saved VISA resource names,
+  skipping Scan/Connect — and restores their Reference/Target roles.
+  Failures are quiet (status message only); turn the option off, or just
+  scan manually, when the hardware setup changes
+- **Default save folder** for measurement logs, chosen per computer
+- **Airtable access token**: set or forget the stored PAT (forgetting
+  also clears the cached device list); the
+  `MULTILASER_AIRTABLE_PAT` environment variable overrides both
 
 ### Simulated Meters (Testing)
 - The Power Meters tab can run without hardware: when a scan finds no
@@ -114,9 +160,11 @@ python laser_controller_gui.py
 
 ### 3. Navigate to Power Meters Tab
 Click on the "Power Meters" tab in the main application window.
+If you have connected before, the app auto-connects to the last-used
+meters at startup (see the Settings tab) and steps 4-6 can be skipped.
 
 ### 4. Scan for Devices
-1. Click the "Scan for Power Meters" button
+1. On the **Settings** tab, click the "Scan for Power Meters" button
 2. The application searches for connected Thorlabs devices (other USB
    instruments are ignored and listed in the log)
 3. Status message will indicate:
@@ -148,19 +196,23 @@ Click on the "Power Meters" tab in the main application window.
 - All readings update automatically at the configured rate
 
 ### 9. Log Measurements (Optional)
-1. Click "New Log File…" and choose the format and where to save the log
+1. Click "New Log File…" and choose the log type
    - **Excel Throughput Log (.xlsx)**: generated with the lantern throughput
      worksheet layout, including formulas for throughput, loss and per-port
      statistics; the sheet is named after the current wavelength
      (e.g. `wave_1550`)
-   - **Lantern Test Report (.xlsx)**: generated with the report layout
-     (one sheet per wavelength, ports 1-19); you are prompted for the
-     lantern serial number. Use "Calibrate Now" (with the reference patch
+   - **Lantern Test Report (.xlsx)**: you first pair the report to a
+     lantern device — pick a serial from the Airtable Devices list or
+     type one in — and then choose where to save it, with a filename
+     suggested from the serial. The file is generated with the report
+     layout (one sheet per wavelength, ports 1-19).
+     Use "Calibrate Now" (with the reference patch
      cord in the target meter) to record the PMREF/Launch cells, then log
      each port — measurements go to the sheet matching the current
      wavelength, and the Port spinner advances automatically after each
      log so repeated logs walk down the ports; spin back to re-log a port
-     (its row is overwritten). If you calibrated before selecting the
+     (you are asked to confirm before its row is overwritten). If you
+     calibrated before selecting the
      report file, you are offered to record those readings when the
      report is attached
    - **CSV File (.csv)**: plain-text log with computed throughput and loss
@@ -168,9 +220,12 @@ Click on the "Power Meters" tab in the main application window.
    layout of an existing Excel log is detected automatically
 3. Set the **Port** number for the lantern port being measured
 4. Optionally adjust **Average over** — each logged measurement is the
-   average of this many recent display readings (default 10, about 1 s at
-   the default 10 Hz update rate; set to 1 to log single readings)
-5. Click "Log Measurement" to record the averaged readings
+   average of this many fresh readings collected after pressing
+   "Log Measurement" (default 10, about 1 s at the default 10 Hz update
+   rate; set to 1 to log single readings)
+5. Click "Log Measurement" to collect and record the readings
+   - A progress bar shows the collection; only readings taken after the
+     press are averaged (press again to cancel the collection)
    - Injection power = corrected reference power
    - Lantern output power = target power
    - The trial number auto-increments

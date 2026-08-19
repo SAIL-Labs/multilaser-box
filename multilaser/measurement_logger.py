@@ -530,6 +530,86 @@ class MeasurementLogger:
         )
         return port
 
+    def read_report_export(self, wavelength_nm: Optional[int] = None) -> dict:
+        """Collect one report sheet's data for export (e.g. to Airtable).
+
+        Returns a dict with the report filename, lantern serial (B1),
+        the sheet's wavelength (B16), pmref_uw (B17), launch_mw (B18) and
+        ports: a list of (port, throughput_mW, reference_uW) tuples for
+        ports that have both values recorded. Values are in the sheet's
+        native units. The sheet is chosen by wavelength_nm as elsewhere.
+        """
+        if self.format != "xlsx" or self._resolve_layout() != "report":
+            raise MeasurementLogError(
+                "Export is only available for Lantern Test Report logs"
+            )
+        if not self.file_path.exists():
+            raise MeasurementLogError(f"Log file not found: {self.file_path}")
+
+        wb = self._load_workbook(read_only=True)
+        try:
+            ws = self._report_sheet(wb, wavelength_nm)
+            serial = ws["B1"].value
+            sheet_wavelength = ws["B16"].value
+            pmref_uw = ws[REPORT_PMREF_CELL].value
+            launch_mw = ws[REPORT_LAUNCH_CELL].value
+
+            ports = []
+            for port in range(1, REPORT_MAX_PORTS + 1):
+                row = REPORT_FIRST_PORT_ROW + port - 1
+                thru_mw = ws.cell(row=row, column=REPORT_COL_OUTPUT_MW).value
+                ref_uw = ws.cell(row=row, column=REPORT_COL_REF_UW).value
+                if isinstance(thru_mw, (int, float)) and isinstance(
+                    ref_uw, (int, float)
+                ):
+                    ports.append((port, float(thru_mw), float(ref_uw)))
+
+            return {
+                "filename": self.file_path.name,
+                "serial": str(serial).strip() if serial is not None else None,
+                "wavelength_nm": (
+                    float(sheet_wavelength)
+                    if isinstance(sheet_wavelength, (int, float))
+                    else None
+                ),
+                "pmref_uw": (
+                    float(pmref_uw) if isinstance(pmref_uw, (int, float)) else None
+                ),
+                "launch_mw": (
+                    float(launch_mw) if isinstance(launch_mw, (int, float)) else None
+                ),
+                "ports": ports,
+            }
+        finally:
+            wb.close()
+
+    def has_port_measurement(
+        self, port: int, wavelength_nm: Optional[int] = None
+    ) -> bool:
+        """Return True if a report log already holds data for the port's row.
+
+        Only report logs are port-keyed (logging a port again overwrites its
+        row); throughput/CSV logs always append, so this returns False for
+        them. The sheet is chosen by wavelength_nm as in append_measurement.
+        """
+        if (
+            self.format != "xlsx"
+            or not self.file_path.exists()
+            or self._resolve_layout() != "report"
+            or not 1 <= port <= REPORT_MAX_PORTS
+        ):
+            return False
+        wb = self._load_workbook(read_only=True)
+        try:
+            ws = self._report_sheet(wb, wavelength_nm)
+            row = REPORT_FIRST_PORT_ROW + port - 1
+            return (
+                ws.cell(row=row, column=REPORT_COL_OUTPUT_MW).value is not None
+                or ws.cell(row=row, column=REPORT_COL_REF_UW).value is not None
+            )
+        finally:
+            wb.close()
+
     def set_report_calibration(
         self, wavelength_nm: Optional[int], pmref_w: float, launch_w: float
     ):

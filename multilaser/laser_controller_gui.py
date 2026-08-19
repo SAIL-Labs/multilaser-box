@@ -41,6 +41,7 @@ from multilaser._version import __version__
 # Import the PowerMeterTab
 try:
     from multilaser.power_meter_tab import PowerMeterTab
+    from multilaser.settings_tab import SettingsTab
     from multilaser.power_meter_controller import PYVISA_AVAILABLE
     POWER_METER_AVAILABLE = PYVISA_AVAILABLE
     if not PYVISA_AVAILABLE:
@@ -179,6 +180,12 @@ class LaserControlGUI(QMainWindow):
         if POWER_METER_AVAILABLE:
             self.power_meter_tab = PowerMeterTab(settings=self.settings)
             self.tab_widget.addTab(self.power_meter_tab, "Power Meters")
+            # Settings tab re-parents the connection/role groups from
+            # the power meter tab into itself
+            self.settings_tab = SettingsTab(self.settings, self.power_meter_tab)
+            self.tab_widget.addTab(self.settings_tab, "Settings")
+            # Auto-connect to the last-used meters once the window is up
+            QTimer.singleShot(500, self.power_meter_tab.try_auto_connect)
 
         # Status bar
         self.statusBar().showMessage("Disconnected")
