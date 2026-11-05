@@ -28,7 +28,11 @@ import sys
 from typing import Callable, Dict, Iterable, List, Optional
 
 from multilaser._version import __version__
-from multilaser.power_meter_controller import THORLABS_VID, MeterCandidate
+from multilaser.power_meter_controller import (
+    RSRC_NFOUND_HINT,
+    THORLABS_VID,
+    MeterCandidate,
+)
 
 # Interface classes worth naming in the USB section
 _USB_CLASSES = {
@@ -92,6 +96,8 @@ def _probe(rm, resource: str, timeout_ms: int) -> List[str]:
             f"      open:      FAILED after {time.monotonic() - start:.2f} s "
             f"- {type(e).__name__}: {e}"
         )
+        if "RSRC_NFOUND" in str(e):
+            lines.append(f"      hint:      {RSRC_NFOUND_HINT}")
     finally:
         if inst is not None:
             try:
@@ -212,7 +218,13 @@ def _windows_section() -> List[str]:
         if result.stderr.strip():
             lines.append(f"stderr: {result.stderr.strip()}")
         lines.append(
-            "Present=False entries are remembered by Windows but not plugged in."
+            "Present=False entries are remembered by Windows but not plugged in.\n"
+            "Each PM100USB has two interfaces: MI_00 (TMC, the measurement "
+            "interface) and MI_01 (DFU, firmware update only; never a VISA "
+            "resource).\nFor this app's NI-VISA backend, the present MI_00 "
+            "entries need Service 'Usbtmc' (IVI/VISA driver); 'WINUSB' "
+            "(ThorlabsUSBDevice) is Thorlabs' own driver, which NI-VISA "
+            "cannot open."
         )
     except Exception as e:
         lines.append(f"PowerShell query failed: {type(e).__name__}: {e}")

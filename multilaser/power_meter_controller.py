@@ -16,6 +16,7 @@ import logging
 import math
 import os
 import random
+import threading
 import time
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
@@ -75,6 +76,16 @@ class PowerMeterError(Exception):
 
 
 THORLABS_VID = 0x1313
+
+# What VI_ERROR_RSRC_NFOUND on a listed Thorlabs entry nearly always means:
+# NI-VISA remembers meters it has seen before (and lists them even when
+# unplugged), and it cannot open a meter whose TMC interface is bound to
+# Thorlabs' own WinUSB driver instead of the USBTMC (VISA) driver.
+RSRC_NFOUND_HINT = (
+    "not found by VISA - either not plugged in (VISA lists meters it has "
+    "seen before), or the meter is using the Thorlabs driver; switch it to "
+    "the VISA/USBTMC driver with Thorlabs' Power Meter Driver Switcher"
+)
 
 
 def _parse_int(text: str) -> Optional[int]:
@@ -152,56 +163,62 @@ class PowerMeter:
         self._wavelength = 1310  # Default wavelength in nm
         self._power_unit = "W"   # Default unit: Watts
         self._averaging = 1   # Default averaging samples
+        # Readings come from a background poller while settings changes come
+        # from the GUI thread; one VISA session must not interleave them.
+        self._lock = threading.RLock()
 
     def connect(self):
         """Connect to the power meter"""
-        try:
-            self.instrument = self.rm.open_resource(self.resource_name)
-            # Sensor head identity ("S120C,<serial>,...") - not the meter's
-            self.device_info = self.instrument.query("SYST:SENS:IDN?").strip()
-            self.connected = True
+        with self._lock:
+            try:
+                self.instrument = self.rm.open_resource(self.resource_name)
+                # Sensor head identity ("S120C,<serial>,...") - not the meter's
+                self.device_info = self.instrument.query("SYST:SENS:IDN?").strip()
+                self.connected = True
 
-            # Apply default settings
-            self.configure_default_settings()
+                # Apply default settings
+                self.configure_default_settings()
 
-            logging.info(f"Connected to power meter: {self.device_info}")
-        except Exception as e:
-            # Don't leave the session open: a later retry would find it busy
-            if self.instrument is not None:
-                try:
-                    self.instrument.close()
-                except Exception:
-                    pass
-                self.instrument = None
-            self.connected = False
-            raise PowerMeterError(f"Failed to connect to {self.resource_name}: {str(e)}")
+                logging.info(f"Connected to power meter: {self.device_info}")
+            except Exception as e:
+                # Don't leave the session open: a later retry would find it busy
+                if self.instrument is not None:
+                    try:
+                        self.instrument.close()
+                    except Exception:
+                        pass
+                    self.instrument = None
+                self.connected = False
+                raise PowerMeterError(f"Failed to connect to {self.resource_name}: {str(e)}")
 
     def disconnect(self):
         """Disconnect from the power meter"""
-        if self.instrument:
-            try:
-                self.instrument.close()
-                self.connected = False
-                logging.info(f"Disconnected from power meter: {self.device_info}")
-            except Exception as e:
-                logging.error(f"Error disconnecting: {str(e)}")
+        with self._lock:
+            if self.instrument:
+                try:
+                    self.instrument.close()
+                    self.connected = False
+                    logging.info(f"Disconnected from power meter: {self.device_info}")
+                except Exception as e:
+                    logging.error(f"Error disconnecting: {str(e)}")
 
     def configure_default_settings(self):
         """Configure default measurement settings"""
-        if not self.connected:
-            raise PowerMeterError("Not connected to power meter")
+        with self._lock:
+            if not self.connected:
+                raise PowerMeterError("Not connected to power meter")
 
-        try:
-            # Enable auto-ranging
-            self.instrument.write("SENS:RANGE:AUTO ON")
-            # Set wavelength
-            self.instrument.write(f"SENS:CORR:WAV {self._wavelength}")
-            # Set power unit
-            self.instrument.write(f"SENS:POW:UNIT {self._power_unit}")
-            # Set averaging
-            self.instrument.write(f"SENS:AVER:COUN {self._averaging}")
-        except Exception as e:
-            raise PowerMeterError(f"Failed to configure settings: {str(e)}")
+            try:
+                # Enable auto-ranging
+                self.instrument.write("SENS:RANGE:AUTO ON")
+                # Set wavelength
+                self.instrument.write(f"SENS:CORR:WAV {self._wavelength}")
+                # Set power unit
+                self.instrument.write(f"SENS:POW:UNIT {self._power_unit}")
+                # Set averaging
+                self.instrument.write(f"SENS:AVER:COUN {self._averaging}")
+            except Exception as e:
+                raise PowerMeterError(f"Failed to configure settings: {str(e)}")
 
     def set_wavelength(self, wavelength_nm: int):
         """
@@ -210,14 +227,15 @@ class PowerMeter:
         Args:
             wavelength_nm: Wavelength in nanometers
         """
-        if not self.connected:
-            raise PowerMeterError("Not connected to power meter")
+        with self._lock:
+            if not self.connected:
+                raise PowerMeterError("Not connected to power meter")
 
-        try:
-            self._wavelength = wavelength_nm
-            self.instrument.write(f"SENS:CORR:WAV {wavelength_nm}")
-        except Exception as e:
-            raise PowerMeterError(f"Failed to set wavelength: {str(e)}")
+            try:
+                self._wavelength = wavelength_nm
+                self.instrument.write(f"SENS:CORR:WAV {wavelength_nm}")
+            except Exception as e:
+                raise PowerMeterError(f"Failed to set wavelength: {str(e)}")
 
     def set_averaging(self, samples: int):
         """
@@ -226,14 +244,15 @@ class PowerMeter:
         Args:
             samples: Number of samples to average
         """
-        if not self.connected:
-            raise PowerMeterError("Not connected to power meter")
+        with self._lock:
+            if not self.connected:
+                raise PowerMeterError("Not connected to power meter")
 
-        try:
-            self._averaging = samples
-            self.instrument.write(f"SENS:AVER:COUN {samples}")
-        except Exception as e:
-            raise PowerMeterError(f"Failed to set averaging: {str(e)}")
+            try:
+                self._averaging = samples
+                self.instrument.write(f"SENS:AVER:COUN {samples}")
+            except Exception as e:
+                raise PowerMeterError(f"Failed to set averaging: {str(e)}")
 
     def read_power(self) -> float:
         """
@@ -242,14 +261,15 @@ class PowerMeter:
         Returns:
             Power reading in Watts
         """
-        if not self.connected:
-            raise PowerMeterError("Not connected to power meter")
+        with self._lock:
+            if not self.connected:
+                raise PowerMeterError("Not connected to power meter")
 
-        try:
-            power_str = self.instrument.query("MEAS:POW?").strip()
-            return float(power_str)
-        except Exception as e:
-            raise PowerMeterError(f"Failed to read power: {str(e)}")
+            try:
+                power_str = self.instrument.query("MEAS:POW?").strip()
+                return float(power_str)
+            except Exception as e:
+                raise PowerMeterError(f"Failed to read power: {str(e)}")
 
     @property
     def serial(self) -> str:
@@ -426,6 +446,8 @@ class PowerMeterController:
         except Exception as e:
             c.responding = False
             c.error = f"{type(e).__name__}: {e}".strip()
+            if "RSRC_NFOUND" in c.error:
+                c.error = f"{RSRC_NFOUND_HINT} [VI_ERROR_RSRC_NFOUND]"
         finally:
             if inst is not None:
                 try:

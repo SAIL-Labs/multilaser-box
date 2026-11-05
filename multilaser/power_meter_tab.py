@@ -56,6 +56,7 @@ from multilaser.power_meter_controller import (
     format_power_auto_scale,
 )
 from multilaser.meter_registry import MeterRegistry
+from multilaser.meter_poller import MeterPoller
 from multilaser.measurement_logger import (
     MeasurementLogger,
     MeasurementLogError,
@@ -323,8 +324,12 @@ class PowerMeterTab(QWidget):
         # Guards against the row-click and spinner handlers re-triggering
         # each other (click selects row -> sets spinner -> would re-select)
         self._syncing_port_selection = False
-        self.update_timer = QTimer()
-        self.update_timer.timeout.connect(self.update_readings)
+        # Reads run on a worker thread (VISA queries block); results arrive
+        # via signal. QTimer-like interface: start/stop/isActive/setInterval.
+        self.update_timer = MeterPoller(self.controller.read_meters, self)
+        self.update_timer.readings.connect(self.update_readings)
+        self.update_timer.timing.connect(self._on_poll_timing)
+        self._slow_read_noted = False
 
         self.init_ui()
         self.load_settings()
@@ -1151,6 +1156,7 @@ class PowerMeterTab(QWidget):
             self._update_log_controls()
 
             # Start updating readings
+            self._slow_read_noted = False
             self.update_timer_rate()
             self.update_timer.start()
 
@@ -1403,6 +1409,8 @@ class PowerMeterTab(QWidget):
         self, ref: bool = True, target: bool = True, raw: bool = True
     ):
         """Drop buffered readings that no longer reflect the current setup"""
+        # A read already in flight also predates the change
+        self.update_timer.invalidate()
         if ref:
             self._ref_history.clear()
         if target:
@@ -1497,10 +1505,27 @@ class PowerMeterTab(QWidget):
         )
         self._reload_measurement_table()
 
-    def update_readings(self):
-        """Update power readings from both meters"""
+    def _on_poll_timing(self, elapsed_s: float, interval_s: float):
+        """Note once per connection when the meters can't keep up."""
+        if self._slow_read_noted or elapsed_s <= interval_s * 1.2:
+            return
+        self._slow_read_noted = True
+        rate = 1.0 / elapsed_s
+        logging.getLogger(__name__).info(
+            f"Power meter reads take {elapsed_s * 1000:.0f} ms; "
+            f"updates limited to ~{rate:.1f} Hz"
+        )
+        self.status_label.setText(
+            f"{self.status_label.text()} - meters answer in "
+            f"{elapsed_s * 1000:.0f} ms, so updates run at ~{rate:.1f} Hz"
+        )
+
+    def update_readings(self, readings=None):
+        """Show a set of readings (from the poller; reads now if None)."""
         try:
-            raw_ref, corrected_ref, target_power = self.controller.read_meters()
+            if readings is None:
+                readings = self.controller.read_meters()
+            raw_ref, corrected_ref, target_power = readings
 
             # Remember latest readings for measurement logging
             # (frozen display holds these values since the timer is stopped)

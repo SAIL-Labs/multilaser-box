@@ -280,6 +280,31 @@ meters at startup (see the Settings tab) and steps 4-6 can be skipped.
   filtered out, and if you genuinely have more than two meters attached, a
   selection dialog lets you choose which ones to use
 
+### Meter Listed but Won't Connect (`VI_ERROR_RSRC_NFOUND`)
+- **Cause 1, wrong driver**: a PM100USB's measurement interface (TMC,
+  `MI_00`) can be bound to Thorlabs' own driver (Device Manager class
+  *ThorlabsUSBDevice*, service `WINUSB`) or to the VISA USBTMC driver
+  (*USB Test and Measurement Device (IVI)*, service `Usbtmc`). This app
+  talks to the meters through NI-VISA, which **only works with the USBTMC
+  driver**: the meter is still listed, but opening it fails.
+  **Fix**: switch the meter to the VISA/USBTMC driver with Thorlabs'
+  *Power Meter Driver Switcher* (installed with Optical Power Monitor).
+  Note Thorlabs' Optical Power Monitor software then needs the switch
+  reversed to use that meter
+- **Cause 2, not plugged in**: NI-VISA keeps listing meters it has seen
+  before. Those entries fail the same way and are shown as *NOT
+  RESPONDING* in the scan; they're harmless
+- The second interface each meter shows in Device Manager, *PM100USB
+  (Interface 1 DFU)*, is for firmware updates only. It is never a VISA
+  resource and can be left alone
+
+### App Is Slow While Meters Are Connected
+- Readings now run on a background thread, so the window stays responsive
+  however slowly the meters answer
+- If the meters answer more slowly than the chosen update rate, the
+  status line says so (e.g. "meters answer in 180 ms, so updates run at
+  ~5 Hz"). Lower the averaging count or the update rate if needed
+
 ### The Same Meter Appears Twice
 - **Symptom**: a scan lists two entries for one meter (often with the
   same serial), and connecting fails or it isn't clear which is right

@@ -9,11 +9,22 @@
 
 NAME = "MultiLaserController"
 
+from PyInstaller.utils.hooks import copy_metadata
+
+# Package metadata so pyvisa/pyvisa-py can report their versions in the
+# diagnostics report (they read it via importlib.metadata)
+_metadata = []
+for _dist in ("pyvisa", "pyvisa-py"):
+    try:
+        _metadata += copy_metadata(_dist)
+    except Exception:
+        pass
+
 a = Analysis(
     ["multilaser/laser_controller_gui.py"],
     pathex=["."],
     binaries=[],
-    datas=[("figures/icon.ico", "figures")],
+    datas=[("figures/icon.ico", "figures")] + _metadata,
     # Imported lazily, so PyInstaller can't see them
     hiddenimports=[
         "velopack",
