@@ -129,6 +129,16 @@ Without openpyxl, measurement logging still works but only in CSV format.
   skipping Scan/Connect — and restores their Reference/Target roles.
   Failures are quiet (status message only); turn the option off, or just
   scan manually, when the hardware setup changes
+- **Known Power Meters**: every meter this computer has connected to,
+  listed by the meter's own serial number (from its USB resource, the
+  same under NI-VISA and pyvisa-py), with model, sensor head, status
+  (Reference / Target when connected) and when it was last seen.
+  Double-click **Name** to give a meter a friendly name, e.g. the label
+  stuck on it; names then appear in scan results, the role menus and
+  under each power display. **Forget Selected** removes an entry. Stored
+  with the other settings (`power_meter/known_meters`)
+- **Diagnose...** (next to Scan): see *Troubleshooting → The same meter
+  appears twice* below
 - **Default save folder** for measurement logs, chosen per computer
 - **Airtable access token**: set or forget the stored PAT (forgetting
   also clears the cached device list); the
@@ -166,12 +176,16 @@ meters at startup (see the Settings tab) and steps 4-6 can be skipped.
 ### 4. Scan for Devices
 1. On the **Settings** tab, click the "Scan for Power Meters" button
 2. The application searches for connected Thorlabs devices (other USB
-   instruments are ignored and listed in the log)
+   instruments are ignored and listed in the log) and checks that each
+   one answers an identity query (`*IDN?`)
 3. Status message will indicate:
-   - "Found 1/2 power meter(s) - ready to connect" (ready to proceed)
+   - "Found Ref tap (P0012345), ... - ready to connect" (ready to proceed)
    - "No power meters found" (check connections)
-4. If more than two Thorlabs meters are detected, a dialog lists them so
-   you can select which one or two to use
+4. If more than two meters are detected, **or any entry doesn't answer**,
+   a dialog lists them all so you can choose one or two. Meters that
+   answered are ticked; entries that didn't are shown in red as
+   *NOT RESPONDING* with the error, and entries sharing a serial number
+   are marked *same serial as another entry*
 
 ### 5. Connect to Power Meters
 1. Click the "Connect" button
@@ -266,6 +280,33 @@ meters at startup (see the Settings tab) and steps 4-6 can be skipped.
   filtered out, and if you genuinely have more than two meters attached, a
   selection dialog lets you choose which ones to use
 
+### The Same Meter Appears Twice
+- **Symptom**: a scan lists two entries for one meter (often with the
+  same serial), and connecting fails or it isn't clear which is right
+- **What the app does now**: each entry is probed during the scan; the
+  one that answers is pre-selected and the other is flagged, so a dead
+  entry no longer breaks the connection
+- **Finding the cause**: click **Diagnose...** on the Settings tab (or run
+  `python -m multilaser.pm_diagnostics` from source). The report lists,
+  for each VISA backend (the default, NI-VISA/`@ivi`, pyvisa-py/`@py`),
+  every resource it sees, each Thorlabs entry's PID / serial / USB
+  interface number, and whether it opens and answers `*IDN?` (meter) and
+  `SYST:SENS:IDN?` (sensor). It also lists raw USB devices (pyusb) with
+  their interface classes, and on Windows the Device Manager entries for
+  `VID_1313` **including ones not currently present**. Copy or save it to
+  share. Things to look for:
+  - two entries differing only by a `::0::` interface number → one
+    physical device listed twice by the VISA library
+  - an entry only one backend lists, or one that fails to open → stale
+    or wrong-driver entry
+  - `Present: False` rows in Device Manager → a remembered ("ghost")
+    device; it can be removed in Device Manager (View → Show hidden
+    devices → Uninstall device)
+  - different PIDs for the same serial → the meter is visible through
+    two drivers (e.g. Thorlabs' own driver and the USBTMC/VISA driver)
+- **Labels**: give each meter a friendly name on the Settings tab so the
+  role menus show "Ref tap (P0012345)" rather than a bare serial
+
 ### Connection Error
 - **Cause**: Device in use by another application or permission issue
 - **Solution**:
@@ -310,6 +351,8 @@ meters at startup (see the Settings tab) and steps 4-6 can be skipped.
    - `PowerMeterController`: Main controller class
    - `PowerMeter`: Individual meter instance
    - `PowerMeterRole`: Enum for role assignment
+   - `MeterCandidate`: a scanned VISA entry, parsed and probed
+     (`scan_power_meters()` / `probe_resource()`)
    - Device discovery and connection management
    - SCPI command interface
 
@@ -319,7 +362,13 @@ meters at startup (see the Settings tab) and steps 4-6 can be skipped.
    - UI layout and user interaction
    - Real-time data updates via QTimer
 
-3. **laser_controller_gui.py** (modified)
+3. **meter_registry.py**: `MeterRegistry`, friendly names and last-seen
+   details keyed by meter serial (QSettings `power_meter/known_meters`)
+
+4. **pm_diagnostics.py**: the enumeration diagnostics report
+   (`collect_report()`; `python -m multilaser.pm_diagnostics`)
+
+5. **laser_controller_gui.py** (modified)
    - Added QTabWidget for tab-based interface
    - Integration of PowerMeterTab
    - Graceful handling when PyVISA not available
