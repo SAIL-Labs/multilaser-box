@@ -17,7 +17,9 @@ This is a Python-based control system for managing multiple lasers through an Ar
 - **One meter can enumerate twice** (e.g. with and without a `::0::` interface number, or via two drivers). `scan_power_meters()` probes each entry with `*IDN?`, and the tab shows a selection dialog whenever any entry fails to answer instead of connecting to both. `find_power_meters()` (no probing) is kept for API compatibility. Settings → Diagnose... (`multilaser/pm_diagnostics.py`) gives the full picture across VISA backends, pyusb and Windows PnP, including non-present devices.
 - **CI builds install unpinned latest pyvisa/pyvisa-py/pyusb**, so two builds of identical source can enumerate USB devices differently (this surfaced the scan bug as a "v0.7.0 regression").
 - **Simulated power meters** (`SimulatedPowerMeter`, resource names starting with `SIM::`) let the Power Meters tab run without hardware or pyvisa: the scan offers them when no real meters are found, or set `MULTILASER_SIM_METERS=1|2`. `PowerMeterController.__init__` deliberately does NOT require pyvisa — only the real scan/connect paths do.
-- **The auto-updater (`updater.py`) never overwrites the running exe** — it downloads the new versioned exe next to the current one, falling back to the user's Downloads folder when the app folder isn't writable (Program Files, read-only shares). The user runs the new exe manually.
+- **Self-update uses Velopack.** `multilaser/updates.py` (no Qt) wraps `velopack.UpdateManager(GithubSource(...))` and turns every failure into `UpdateError`; `multilaser/update_controller.py` runs checks on a `threading.Thread`, returns results via Qt signals and shows the Restart now / Later bar. `run_install_hooks()` **must stay the first line of `main()`** (Velopack launches the exe with hook arguments during install/update/uninstall). `apply_updates_and_restart` exits the process without a normal close, so `LaserControlGUI.prepare_for_exit()` (lasers off, meters released, settings synced) is passed as `before_restart`.
+- **`velopack==1.2.161` (pyproject) and `VPK_VERSION` (workflow) must match.** Only the PyInstaller **one-folder** build (`multilaser.spec`) can be packed; a bare `dist/` folder or source checkout reports updates as unavailable.
+- **v1.0.0 and older use the old one-file updater**, which looks for `MultiLaserController-Windows.zip` and copies the first `MultiLaserController-v*.exe` inside it. The workflow keeps shipping that zip with the installer renamed `MultiLaserController-vX.Y.Z-Setup.exe` as a migration bridge.
 
 ## Key Design Patterns
 
@@ -74,9 +76,9 @@ This is a Python-based control system for managing multiple lasers through an Ar
 
 ### Version Management
 
-- Git tags (format: `v{major}.{minor}.{patch}`) are the **single source of truth** for releases; GitHub Actions extracts the version from the tag that triggers the workflow — no manual VERSION file edits needed.
-- For development, `_version.py` falls back: VERSION file → `git describe --tags --abbrev=0` → `"0.0.0-dev"`.
-- Release: `git tag -a v0.7.0 -m "Release version 0.7.0" && git push origin v0.7.0` — GitHub Actions builds Windows/macOS executables and creates the release automatically.
+- `multilaser/_version.py` (`__version__ = "X.Y.Z"`) is the **single version source**; `pyproject.toml` reads it via `[tool.setuptools.dynamic]`. The release workflow fails if the tag ≠ `v{__version__}`, so bump it before tagging.
+- Release: bump `__version__`, commit, then `git tag -a vX.Y.Z -m "Release version X.Y.Z" && git push origin vX.Y.Z` — GitHub Actions (windows-latest) runs the tests, builds with PyInstaller, packs with `vpk` and publishes Setup.exe, Portable zip and the update feed files to the release. Keep all of those assets; installed copies update from them.
+- Tests: `QT_QPA_PLATFORM=offscreen python -m pytest` (`tests/`, uses a `FakeManager` instead of velopack).
 - See `docs/updating_version.md` for detailed release instructions.
 
 ## Hardware Context

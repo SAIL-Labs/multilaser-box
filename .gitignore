@@ -133,3 +133,7 @@ $RECYCLE.BIN/
 .conda_env/
 Thorlabs PMxxx Power Meters
 settings.local.json
+
+# Velopack build output, and the update token CI may write
+Releases/
+multilaser/_update_token.py
