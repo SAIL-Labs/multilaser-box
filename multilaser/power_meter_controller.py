@@ -17,6 +17,7 @@ import math
 import os
 import random
 import time
+from dataclasses import dataclass
 from typing import Optional, List, Tuple
 from enum import Enum
 
@@ -73,6 +74,64 @@ class PowerMeterError(Exception):
     pass
 
 
+THORLABS_VID = 0x1313
+
+
+def _parse_int(text: str) -> Optional[int]:
+    """Parse "0x1313" (NI-VISA) or "4883" (pyvisa-py) style numbers."""
+    try:
+        return int(text, 0)
+    except (TypeError, ValueError):
+        return None
+
+
+@dataclass
+class MeterCandidate:
+    """One VISA resource found by a scan, with what probing it showed.
+
+    A USB resource string looks like
+    ``USB<board>::<vid>::<pid>::<serial>[::<interface>]::INSTR``; the VID/PID
+    are hex under NI-VISA and decimal under pyvisa-py.
+    """
+    resource: str
+    vid: Optional[int] = None
+    pid: Optional[int] = None
+    serial: str = ""
+    interface: Optional[str] = None
+    responding: Optional[bool] = None  # None = not probed
+    idn: str = ""                      # *IDN? reply (the meter itself)
+    error: str = ""                    # why probing failed
+    elapsed_s: float = 0.0
+
+    @classmethod
+    def from_resource(cls, resource: str) -> "MeterCandidate":
+        parts = resource.split("::")
+        c = cls(resource=resource)
+        if resource.startswith(SIM_RESOURCE_PREFIX):
+            # SIM::0x1313::0x8078::SIM0001::INSTR
+            parts = parts[1:]
+            c.vid, c.pid = _parse_int(parts[0]), _parse_int(parts[1])
+            c.serial = parts[2]
+            return c
+        if parts and parts[0].upper().startswith("USB") and len(parts) >= 4:
+            c.vid = _parse_int(parts[1])
+            c.pid = _parse_int(parts[2])
+            c.serial = parts[3]
+            if len(parts) >= 6:
+                c.interface = parts[4]
+        return c
+
+    @property
+    def model(self) -> str:
+        """Model from *IDN? ("Thorlabs,PM100USB,P0012345,1.6.0"), if probed"""
+        fields = [f.strip() for f in self.idn.split(",")]
+        return fields[1] if len(fields) > 1 else ""
+
+    @property
+    def pid_text(self) -> str:
+        return f"0x{self.pid:04X}" if self.pid is not None else "?"
+
+
 class PowerMeter:
     """Individual power meter instance"""
 
@@ -98,6 +157,7 @@ class PowerMeter:
         """Connect to the power meter"""
         try:
             self.instrument = self.rm.open_resource(self.resource_name)
+            # Sensor head identity ("S120C,<serial>,...") - not the meter's
             self.device_info = self.instrument.query("SYST:SENS:IDN?").strip()
             self.connected = True
 
@@ -106,6 +166,14 @@ class PowerMeter:
 
             logging.info(f"Connected to power meter: {self.device_info}")
         except Exception as e:
+            # Don't leave the session open: a later retry would find it busy
+            if self.instrument is not None:
+                try:
+                    self.instrument.close()
+                except Exception:
+                    pass
+                self.instrument = None
+            self.connected = False
             raise PowerMeterError(f"Failed to connect to {self.resource_name}: {str(e)}")
 
     def disconnect(self):
@@ -183,18 +251,28 @@ class PowerMeter:
         except Exception as e:
             raise PowerMeterError(f"Failed to read power: {str(e)}")
 
+    @property
+    def serial(self) -> str:
+        """The meter's own serial number (from the USB resource string).
+
+        Friendly names are keyed on this; it identifies the meter body,
+        whereas device_info describes the (swappable) sensor head.
+        """
+        return MeterCandidate.from_resource(self.resource_name).serial
+
     def set_role(self, role: PowerMeterRole):
         """Set the role of this power meter"""
         self.role = role
 
     def get_short_name(self) -> str:
-        """Get a short name for display purposes"""
-        if self.device_info:
-            # Extract serial number from device info if available
-            parts = self.device_info.split(',')
-            if len(parts) > 2:
-                return f"PM ({parts[2].strip()})"
-        return self.resource_name.split('::')[-2] if '::' in self.resource_name else self.resource_name
+        """Get a short name for display purposes: "PM (<meter serial>)".
+
+        (This used to take field 3 of the sensor IDN, which is the sensor's
+        calibration date, not a serial - so two meters were hard to tell
+        apart.)
+        """
+        serial = self.serial
+        return f"PM ({serial})" if serial else self.resource_name
 
 
 SIM_RESOURCE_PREFIX = "SIM::"
@@ -324,6 +402,53 @@ class PowerMeterController:
 
         except Exception as e:
             raise PowerMeterError(f"Failed to find power meters: {str(e)}")
+
+    def probe_resource(self, resource: str, timeout_ms: int = 2000) -> MeterCandidate:
+        """Open a resource, ask *IDN? and close it again.
+
+        Used to tell a working meter from a stale or duplicate VISA entry.
+        Never raises; the outcome is in the returned candidate.
+        """
+        c = MeterCandidate.from_resource(resource)
+        if self.is_simulated_resource(resource):
+            c.responding = True
+            c.idn = f"Thorlabs,PM100USB,{c.serial},1.0 (simulated)"
+            return c
+        start = time.monotonic()
+        inst = None
+        try:
+            if self.rm is None:
+                self.rm = pyvisa.ResourceManager()
+            inst = self.rm.open_resource(resource, open_timeout=timeout_ms)
+            inst.timeout = timeout_ms
+            c.idn = inst.query("*IDN?").strip()
+            c.responding = True
+        except Exception as e:
+            c.responding = False
+            c.error = f"{type(e).__name__}: {e}".strip()
+        finally:
+            if inst is not None:
+                try:
+                    inst.close()
+                except Exception:
+                    pass
+            c.elapsed_s = time.monotonic() - start
+        level = logging.INFO if c.responding else logging.WARNING
+        logging.log(level, f"Probe {resource}: "
+                    + (c.idn if c.responding else f"no response ({c.error})"))
+        return c
+
+    def scan_power_meters(self, probe: bool = True) -> List[MeterCandidate]:
+        """Find Thorlabs meters and (optionally) check each one answers.
+
+        Like find_power_meters(), but returns MeterCandidate objects so the
+        GUI can flag entries that don't respond (e.g. a duplicate or stale
+        VISA entry for the same meter) instead of failing to connect.
+        """
+        resources = self.find_power_meters()
+        if not probe:
+            return [MeterCandidate.from_resource(r) for r in resources]
+        return [self.probe_resource(r) for r in resources]
 
     def connect_power_meters(self, resource_names: List[str]):
         """

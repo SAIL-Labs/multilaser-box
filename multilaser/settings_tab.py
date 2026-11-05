@@ -5,6 +5,8 @@ Collects the app's stored configuration in one place:
 
 - Power meter connection and role assignment (the group boxes are
   re-parented here from the Power Meters tab)
+- Known power meters and their friendly names (e.g. matching the labels
+  on the hardware), keyed by meter serial number
 - Auto-connect to the last-used meters at startup (skips scan/connect)
 - Default save folder for measurement logs (e.g. the OneDrive
   "Lantern Data" folder, whose location varies per computer)
@@ -14,6 +16,7 @@ Author: Multi-Laser Box Project
 Date: 2026-08-20
 """
 
+import datetime
 import logging
 import os
 from pathlib import Path
@@ -29,8 +32,13 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QInputDialog,
     QLineEdit,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QAbstractItemView,
+    QMessageBox,
 )
-from PyQt6.QtCore import QSettings
+from PyQt6.QtCore import QSettings, Qt
 
 from multilaser.power_meter_tab import PowerMeterTab
 
@@ -57,6 +65,9 @@ class SettingsTab(QWidget):
         # === Power meter connection & roles (re-parented from pm tab) ===
         layout.addWidget(self.pm_tab.connection_group)
         layout.addWidget(self.pm_tab.role_group)
+
+        # === Known power meters / friendly names ===
+        layout.addWidget(self._create_known_meters_group())
 
         # === Startup ===
         startup_group = QGroupBox("Startup")
@@ -136,6 +147,108 @@ class SettingsTab(QWidget):
 
         layout.addStretch()
         self.setLayout(layout)
+
+    # === Known power meters ===
+
+    COLUMNS = ["Name", "Serial", "Model", "Status", "Sensor", "Last seen"]
+
+    def _create_known_meters_group(self) -> QGroupBox:
+        group = QGroupBox("Known Power Meters")
+        group.setToolTip(
+            "Meters this computer has connected to, by serial number.\n"
+            "Double-click a Name to set a friendly name (e.g. the label on\n"
+            "the meter). Names appear in scans, role menus and displays."
+        )
+        v = QVBoxLayout()
+        self.meters_table = QTableWidget(0, len(self.COLUMNS))
+        self.meters_table.setHorizontalHeaderLabels(self.COLUMNS)
+        header = self.meters_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.meters_table.verticalHeader().setVisible(False)
+        self.meters_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.meters_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+        )
+        self.meters_table.setMaximumHeight(160)
+        self.meters_table.itemChanged.connect(self._on_meter_item_changed)
+        v.addWidget(self.meters_table)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel(
+            "Tip: connect one meter at a time, or cover a sensor and watch which "
+            "reading drops, to match a serial to its label."
+        ))
+        row.addStretch()
+        remove_btn = QPushButton("Forget Selected")
+        remove_btn.setToolTip("Remove the selected meter and its name from this list")
+        remove_btn.clicked.connect(self.forget_selected_meter)
+        row.addWidget(remove_btn)
+        v.addLayout(row)
+        group.setLayout(v)
+
+        self.pm_tab.known_meters_changed.connect(self.refresh_known_meters)
+        self.refresh_known_meters()
+        return group
+
+    def refresh_known_meters(self):
+        """Rebuild the known-meters table from the registry."""
+        devices = self.pm_tab.registry.devices()
+        roles = self.pm_tab.meter_roles()
+        self.meters_table.blockSignals(True)
+        self.meters_table.setRowCount(0)
+        for serial in sorted(devices, key=lambda s: (s not in roles, s)):
+            info = devices[serial]
+            r = self.meters_table.rowCount()
+            self.meters_table.insertRow(r)
+            last_seen = info.get("last_seen")
+            seen_text = (
+                datetime.datetime.fromtimestamp(last_seen).strftime("%Y-%m-%d %H:%M")
+                if last_seen else ""
+            )
+            values = [
+                info.get("name", ""),
+                serial,
+                info.get("model", ""),
+                roles.get(serial, ""),
+                info.get("sensor", ""),
+                seen_text,
+            ]
+            for c, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if c != 0:
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if c == 1:
+                    item.setToolTip(f"Last resource: {info.get('resource', '')}")
+                item.setData(Qt.ItemDataRole.UserRole, serial)
+                self.meters_table.setItem(r, c, item)
+        self.meters_table.blockSignals(False)
+
+    def _on_meter_item_changed(self, item: QTableWidgetItem):
+        if item.column() != 0:
+            return
+        serial = item.data(Qt.ItemDataRole.UserRole)
+        self.pm_tab.registry.set_name(serial, item.text())
+        self.pm_tab.refresh_meter_names()
+
+    def forget_selected_meter(self):
+        rows = {i.row() for i in self.meters_table.selectedItems()}
+        if not rows:
+            return
+        serials = [self.meters_table.item(r, 1).text() for r in sorted(rows)]
+        reply = QMessageBox.question(
+            self, "Forget Meters",
+            "Forget " + ", ".join(serials) + " and their names?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        for serial in serials:
+            self.pm_tab.registry.remove(serial)
+        self.refresh_known_meters()
+        self.pm_tab.refresh_meter_names()
 
     # === Measurement files ===
 

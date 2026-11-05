@@ -41,17 +41,21 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QLineEdit,
     QProgressDialog,
+    QApplication,
+    QPlainTextEdit,
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings, QThread, pyqtSignal
-from PyQt6.QtGui import QFont
-from typing import Optional
+from PyQt6.QtGui import QFont, QFontDatabase
+from typing import Callable, List, Optional
 
 from multilaser.power_meter_controller import (
+    MeterCandidate,
     PowerMeterController,
     PowerMeterError,
     PowerMeterRole,
     format_power_auto_scale,
 )
+from multilaser.meter_registry import MeterRegistry
 from multilaser.measurement_logger import (
     MeasurementLogger,
     MeasurementLogError,
@@ -62,29 +66,59 @@ from multilaser import airtable_sync
 from multilaser.airtable_sync import AirtableSyncError
 
 
+def describe_candidate(c: MeterCandidate, label: Callable[[str], str],
+                       duplicate: bool = False) -> str:
+    """Two-line description of a scanned meter for the selection dialog."""
+    text = label(c.serial)
+    if c.model:
+        text += f" - {c.model}"
+    if c.responding is False:
+        text += f"  [NOT RESPONDING: {c.error or 'no reply'}]"
+    if duplicate:
+        text += "  [same serial as another entry]"
+    return f"{text}\n    {c.resource}"
+
+
 class MeterSelectionDialog(QDialog):
-    """Dialog to choose which power meters to use when more than two are found"""
+    """Choose which scanned meters to use.
+
+    Shown when more than two meters are found, or when any entry fails to
+    answer *IDN? (typically a duplicate/stale VISA entry for one meter):
+    responding meters are pre-selected, non-responding ones are not.
+    """
 
     MAX_SELECTED = 2
 
-    def __init__(self, resources, parent=None):
+    def __init__(self, candidates: List[MeterCandidate],
+                 label: Callable[[str], str] = lambda serial: serial,
+                 parent=None):
         super().__init__(parent)
         self.setWindowTitle("Select Power Meters")
         layout = QVBoxLayout(self)
 
-        layout.addWidget(
-            QLabel(
-                f"{len(resources)} power meters were detected.\n"
-                f"Select up to {self.MAX_SELECTED} to use:"
+        bad = sum(1 for c in candidates if c.responding is False)
+        text = f"{len(candidates)} power meter entries were detected"
+        if bad:
+            text += (
+                f"; {bad} did not respond (probably a duplicate or stale "
+                f"entry; Settings > Diagnose... shows details)"
             )
-        )
+        layout.addWidget(QLabel(f"{text}.\nSelect up to {self.MAX_SELECTED} to use:"))
 
-        self._checkboxes = []
-        for resource in resources:
-            checkbox = QCheckBox(resource)
+        serials = [c.serial for c in candidates]
+        good = [c for c in candidates if c.responding is not False]
+        self._items = []
+        for c in candidates:
+            checkbox = QCheckBox(
+                describe_candidate(c, label, duplicate=serials.count(c.serial) > 1)
+            )
+            if c.responding is False:
+                checkbox.setStyleSheet("color: #c0392b;")
+            elif len(good) <= self.MAX_SELECTED:
+                checkbox.setChecked(True)
             checkbox.toggled.connect(self._update_ok_button)
             layout.addWidget(checkbox)
-            self._checkboxes.append(checkbox)
+            self._items.append((checkbox, c.resource))
 
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -97,12 +131,56 @@ class MeterSelectionDialog(QDialog):
 
     def selected_resources(self):
         """Return the resource names of the checked meters"""
-        return [cb.text() for cb in self._checkboxes if cb.isChecked()]
+        return [resource for cb, resource in self._items if cb.isChecked()]
 
     def _update_ok_button(self):
         count = len(self.selected_resources())
         ok_button = self._buttons.button(QDialogButtonBox.StandardButton.Ok)
         ok_button.setEnabled(1 <= count <= self.MAX_SELECTED)
+
+
+class DiagnosticsDialog(QDialog):
+    """Shows the power meter diagnostics report with Copy / Save buttons."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Power Meter Diagnostics")
+        self.resize(900, 600)
+        layout = QVBoxLayout(self)
+        self.text = QPlainTextEdit()
+        self.text.setReadOnly(True)
+        self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.text.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        self.text.setPlainText("Collecting diagnostics (probing each meter)...")
+        layout.addWidget(self.text)
+        buttons = QHBoxLayout()
+        self.copy_btn = QPushButton("Copy to Clipboard")
+        self.copy_btn.clicked.connect(
+            lambda: QApplication.clipboard().setText(self.text.toPlainText())
+        )
+        self.save_btn = QPushButton("Save...")
+        self.save_btn.clicked.connect(self._save)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        for b in (self.copy_btn, self.save_btn):
+            b.setEnabled(False)
+            buttons.addWidget(b)
+        buttons.addStretch()
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+    def set_report(self, report: str):
+        self.text.setPlainText(report)
+        self.copy_btn.setEnabled(True)
+        self.save_btn.setEnabled(True)
+
+    def _save(self):
+        name = f"power_meter_diagnostics_{datetime.now():%Y%m%d_%H%M%S}.txt"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Diagnostics", str(Path.home() / name), "Text files (*.txt)"
+        )
+        if path:
+            Path(path).write_text(self.text.toPlainText(), encoding="utf-8")
 
 
 class _AirtableWorker(QThread):
@@ -215,10 +293,14 @@ class PowerDisplay(QWidget):
 class PowerMeterTab(QWidget):
     """Main power meter tab widget"""
 
+    # Emitted when the known-meters registry or the connected meters change
+    known_meters_changed = pyqtSignal()
+
     def __init__(self, settings: QSettings = None, parent=None):
         super().__init__(parent)
         self.settings = settings or QSettings("MultiLaserBox", "LaserController")
         self.controller = PowerMeterController()
+        self.registry = MeterRegistry(self.settings)
         self.available_meters = []
         self.frozen = False
         self.active_laser_number = None
@@ -268,6 +350,15 @@ class PowerMeterTab(QWidget):
         self.scan_btn.setMinimumWidth(150)
         self.scan_btn.clicked.connect(self.scan_power_meters)
         scan_row.addWidget(self.scan_btn)
+
+        self.diagnose_btn = QPushButton("Diagnose...")
+        self.diagnose_btn.setToolTip(
+            "List every power meter entry the VISA backends, USB and Windows\n"
+            "can see, and test which ones respond. Use when a meter appears\n"
+            "twice or won't connect; the report can be copied or saved."
+        )
+        self.diagnose_btn.clicked.connect(self.run_diagnostics)
+        scan_row.addWidget(self.diagnose_btn)
 
         self.status_label = QLabel("No power meters connected")
         self.status_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
@@ -771,59 +862,139 @@ class PowerMeterTab(QWidget):
         self._sync_port_row_selection()
 
     def scan_power_meters(self):
-        """Scan for available power meters"""
+        """Scan for power meters, checking that each entry responds.
+
+        Entries that don't answer *IDN? (e.g. a second, stale VISA entry for
+        the same meter) are flagged rather than connected to, so one dead
+        entry can't make the whole connection fail.
+        """
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            self.available_meters = self.controller.find_power_meters()
-            count = len(self.available_meters)
-
-            if count == 0:
-                reply = QMessageBox.question(
-                    self,
-                    "No Devices Found",
-                    "No Thorlabs power meters found.\n\n"
-                    "Make sure the devices are connected and drivers are installed.\n\n"
-                    "Use simulated power meters instead (for testing without hardware)?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
-                )
-                if reply == QMessageBox.StandardButton.Yes:
-                    self.available_meters = self.controller.simulated_resources()
-                    self.status_label.setText(
-                        "Simulation mode - 2 simulated meters ready to connect"
-                    )
-                    self.status_label.setStyleSheet("color: #f39c12; font-weight: bold;")
-                    self.connect_btn.setEnabled(True)
-                else:
-                    self.status_label.setText("No power meters found")
-                    self.status_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
-                    self.connect_btn.setEnabled(False)
-
-            elif count in [1, 2]:
-                self.status_label.setText(f"Found {count} power meter(s) - ready to connect")
-                self.status_label.setStyleSheet("color: #27ae60; font-weight: bold;")
-                self.connect_btn.setEnabled(True)
-
-            else:
-                dialog = MeterSelectionDialog(self.available_meters, self)
-                if dialog.exec():
-                    self.available_meters = dialog.selected_resources()
-                    selected = len(self.available_meters)
-                    self.status_label.setText(
-                        f"Selected {selected} of {count} power meters - ready to connect"
-                    )
-                    self.status_label.setStyleSheet("color: #27ae60; font-weight: bold;")
-                    self.connect_btn.setEnabled(True)
-                else:
-                    self.status_label.setText(
-                        f"Found {count} power meters - none selected (scan again to choose)"
-                    )
-                    self.status_label.setStyleSheet("color: #e67e22; font-weight: bold;")
-                    self.connect_btn.setEnabled(False)
-
+            candidates = self.controller.scan_power_meters(probe=True)
         except PowerMeterError as e:
             QMessageBox.critical(
                 self, "Scan Error", f"Failed to scan for power meters:\n{str(e)}"
             )
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        for c in candidates:
+            if c.responding and not self.controller.is_simulated_resource(c.resource):
+                self.registry.record_seen(c.serial, model=c.model, resource=c.resource)
+
+        self.known_meters_changed.emit()
+        count = len(candidates)
+        bad = sum(1 for c in candidates if c.responding is False)
+
+        if count == 0:
+            reply = QMessageBox.question(
+                self,
+                "No Devices Found",
+                "No Thorlabs power meters found.\n\n"
+                "Make sure the devices are connected and drivers are installed.\n\n"
+                "Use simulated power meters instead (for testing without hardware)?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.available_meters = self.controller.simulated_resources()
+                self.status_label.setText(
+                    "Simulation mode - 2 simulated meters ready to connect"
+                )
+                self.status_label.setStyleSheet("color: #f39c12; font-weight: bold;")
+                self.connect_btn.setEnabled(True)
+            else:
+                self.status_label.setText("No power meters found")
+                self.status_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
+                self.connect_btn.setEnabled(False)
+            return
+
+        if bad == 0 and count <= 2:
+            self.available_meters = [c.resource for c in candidates]
+            self._set_ready_status("Found", self.available_meters)
+            return
+
+        dialog = MeterSelectionDialog(candidates, self.registry.label, self)
+        if dialog.exec() and dialog.selected_resources():
+            self.available_meters = dialog.selected_resources()
+            self._set_ready_status("Selected", self.available_meters)
+        else:
+            extra = f", {bad} not responding" if bad else ""
+            self.status_label.setText(
+                f"Found {count} entries{extra} - none selected (scan again to choose)"
+            )
+            self.status_label.setStyleSheet("color: #e67e22; font-weight: bold;")
+            self.connect_btn.setEnabled(False)
+
+    def _set_ready_status(self, verb: str, resources: List[str]):
+        names = ", ".join(
+            self.registry.label(MeterCandidate.from_resource(r).serial) for r in resources
+        )
+        self.status_label.setText(f"{verb} {names} - ready to connect")
+        self.status_label.setStyleSheet("color: #27ae60; font-weight: bold;")
+        self.connect_btn.setEnabled(True)
+
+    def run_diagnostics(self):
+        """Collect the enumeration diagnostics report in the background."""
+        from multilaser import pm_diagnostics
+
+        in_use = {
+            pm.resource_name: f"{self.registry.label(pm.serial)}; sensor {pm.device_info}"
+            for pm in self.controller.get_power_meters()
+        }
+        names = self.registry.name
+        dialog = DiagnosticsDialog(self)
+        worker = _AirtableWorker(
+            lambda: pm_diagnostics.collect_report(in_use=in_use, names=names), self
+        )
+        worker.finished_ok.connect(dialog.set_report)
+        worker.failed.connect(
+            lambda e: dialog.set_report(f"Diagnostics failed: {type(e).__name__}: {e}")
+        )
+        self.diagnose_btn.setEnabled(False)
+        worker.finished.connect(lambda: self.diagnose_btn.setEnabled(True))
+        worker.finished.connect(worker.deleteLater)
+        self._diagnostics_worker = worker
+        worker.start()
+        dialog.exec()
+
+    # === Friendly names ===
+
+    def _meter_combo_label(self, index: int, pm) -> str:
+        return f"Meter {index + 1}: {self.registry.label(pm.serial, pm.get_short_name())}"
+
+    def _meter_info(self, pm) -> str:
+        """Device text under a power display: meter name/serial and sensor."""
+        meter = self.registry.label(pm.serial, pm.get_short_name())
+        return f"{meter}\nSensor: {pm.device_info}" if pm.device_info else meter
+
+    def meter_roles(self) -> dict:
+        """{serial: "Reference" / "Target" / "Connected"} for connected meters"""
+        roles = {}
+        for pm in self.controller.get_power_meters():
+            if pm is self.controller.reference_meter:
+                roles[pm.serial] = "Reference"
+            elif pm is self.controller.target_meter:
+                roles[pm.serial] = "Target"
+            else:
+                roles[pm.serial] = "Connected"
+        return roles
+
+    def refresh_meter_names(self):
+        """Re-label connected meters after a friendly name changes."""
+        meters = self.controller.get_power_meters()
+        for combo in (self.ref_combo, self.target_combo):
+            for i in range(combo.count()):
+                idx = combo.itemData(i)
+                if idx is not None and idx < len(meters):
+                    combo.setItemText(i, self._meter_combo_label(idx, meters[idx]))
+        for display, idx in (
+            (self.ref_display, self.ref_combo.currentData()),
+            (self.target_display, self.target_combo.currentData()),
+        ):
+            if idx is not None and idx < len(meters):
+                display.set_device_info(self._meter_info(meters[idx]))
 
     def toggle_connection(self):
         """Toggle connection to power meters"""
@@ -868,6 +1039,12 @@ class PowerMeterTab(QWidget):
 
             meters = self.controller.get_power_meters()
             num_meters = len(meters)
+            for pm in meters:
+                if not self.controller.is_simulated_resource(pm.resource_name):
+                    self.registry.record_seen(
+                        pm.serial, resource=pm.resource_name, sensor=pm.device_info
+                    )
+            self.known_meters_changed.emit()
 
             # Populate role selection combo boxes
             self.ref_combo.blockSignals(True)
@@ -881,7 +1058,7 @@ class PowerMeterTab(QWidget):
             self.target_combo.addItem(none_label, None)
 
             for i, pm in enumerate(meters):
-                label = f"Meter {i + 1}: {pm.get_short_name()}"
+                label = self._meter_combo_label(i, pm)
                 self.ref_combo.addItem(label, i)
                 self.target_combo.addItem(label, i)
 
@@ -922,11 +1099,11 @@ class PowerMeterTab(QWidget):
 
             # Update device info in displays
             if num_meters == 2:
-                self.ref_display.set_device_info(meters[0].device_info)
-                self.target_display.set_device_info(meters[1].device_info)
+                self.ref_display.set_device_info(self._meter_info(meters[0]))
+                self.target_display.set_device_info(self._meter_info(meters[1]))
             else:
                 self.ref_display.set_device_info("Not assigned")
-                self.target_display.set_device_info(meters[0].device_info)
+                self.target_display.set_device_info(self._meter_info(meters[0]))
 
             # Enable controls
             self.ref_combo.setEnabled(True)
@@ -1062,6 +1239,7 @@ class PowerMeterTab(QWidget):
 
         self.status_label.setText("Disconnected")
         self.status_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
+        self.known_meters_changed.emit()
 
     def update_role_assignment(self):
         """Update the role assignment based on combo box selection"""
@@ -1105,18 +1283,19 @@ class PowerMeterTab(QWidget):
                 # Update device info in displays
                 meters = self.controller.get_power_meters()
                 if ref_index is not None:
-                    self.ref_display.set_device_info(meters[ref_index].device_info)
+                    self.ref_display.set_device_info(self._meter_info(meters[ref_index]))
                 else:
                     self.ref_display.set_device_info("Not assigned")
 
                 if target_index is not None:
-                    self.target_display.set_device_info(meters[target_index].device_info)
+                    self.target_display.set_device_info(self._meter_info(meters[target_index]))
                 else:
                     self.target_display.set_device_info("Not assigned")
 
                 # Enable calibrate button only when both roles are assigned
                 has_both = ref_index is not None and target_index is not None
                 self.calibrate_btn.setEnabled(has_both)
+                self.known_meters_changed.emit()
 
             except PowerMeterError as e:
                 QMessageBox.critical(
