@@ -298,6 +298,18 @@ meters at startup (see the Settings tab) and steps 4-6 can be skipped.
   (Interface 1 DFU)*, is for firmware updates only. It is never a VISA
   resource and can be left alone
 
+### "No sensor head connected" / "No reading from meter"
+- **Cause**: the photodiode head is unplugged from the meter (or not
+  answering). The meter then never replies to a power reading
+- **What the app does**: the affected display turns red and says why; the
+  other meter keeps reading. The app stops asking that meter for power
+  and just checks every 2 s whether a head is back, so nothing stalls.
+  When you plug a head in, readings resume by themselves and the
+  wavelength, averaging and auto-range settings are re-applied (a
+  different head can be fitted). Calibrate Now reports the fault
+  instead of a generic error
+- Meters connected without a head are flagged straight away
+
 ### App Is Slow While Meters Are Connected
 - Readings now run on a background thread, so the window stays responsive
   however slowly the meters answer

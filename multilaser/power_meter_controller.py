@@ -143,6 +143,26 @@ class MeterCandidate:
         return f"0x{self.pid:04X}" if self.pid is not None else "?"
 
 
+NO_SENSOR_FAULT = "No sensor head connected - plug the photodiode into the meter"
+READ_FAULT = "No reading from meter - check the sensor head"
+FAULT_RETRY_S = 2.0          # while faulted, re-check this often
+SENSOR_CHECK_TIMEOUT_MS = 300
+
+
+def sensor_idn_present(idn: str) -> Optional[bool]:
+    """Interpret a SYST:SENS:IDN? reply ("S120C,<serial>,<cal date>,...").
+
+    Returns False when the meter reports no sensor head, True when it names
+    one, None when the reply can't be interpreted.
+    """
+    name = idn.split(",")[0].strip().lower() if idn else ""
+    if not name:
+        return None
+    if "no sensor" in name or name in ("none", "nosensor", "no_sensor"):
+        return False
+    return True
+
+
 class PowerMeter:
     """Individual power meter instance"""
 
@@ -166,15 +186,27 @@ class PowerMeter:
         # Readings come from a background poller while settings changes come
         # from the GUI thread; one VISA session must not interleave them.
         self._lock = threading.RLock()
+        # Set when readings fail (typically the sensor head is unplugged);
+        # read_meters() then backs off instead of blocking on every poll
+        self.fault = ""
+        self.retry_at = 0.0
 
     def connect(self):
         """Connect to the power meter"""
         with self._lock:
             try:
                 self.instrument = self.rm.open_resource(self.resource_name)
+                self.instrument.timeout = self._read_timeout_ms()
                 # Sensor head identity ("S120C,<serial>,...") - not the meter's
                 self.device_info = self.instrument.query("SYST:SENS:IDN?").strip()
                 self.connected = True
+                if sensor_idn_present(self.device_info) is False:
+                    # Connect anyway, but don't let the first poll time out
+                    self.fault = NO_SENSOR_FAULT
+                    self.retry_at = time.monotonic() + FAULT_RETRY_S
+                    logging.warning(
+                        f"{self.resource_name}: no sensor head ({self.device_info})"
+                    )
 
                 # Apply default settings
                 self.configure_default_settings()
@@ -251,6 +283,7 @@ class PowerMeter:
             try:
                 self._averaging = samples
                 self.instrument.write(f"SENS:AVER:COUN {samples}")
+                self.instrument.timeout = self._read_timeout_ms()
             except Exception as e:
                 raise PowerMeterError(f"Failed to set averaging: {str(e)}")
 
@@ -269,7 +302,45 @@ class PowerMeter:
                 power_str = self.instrument.query("MEAS:POW?").strip()
                 return float(power_str)
             except Exception as e:
+                # Flush whatever the meter may still send for this query
+                try:
+                    self.instrument.clear()
+                except Exception:
+                    pass
                 raise PowerMeterError(f"Failed to read power: {str(e)}")
+
+    def _read_timeout_ms(self) -> int:
+        """VISA timeout for a reading: generous for the averaging, but short
+        enough that a meter with no sensor head can't stall polling for long."""
+        return 1000 + 3 * max(1, int(self._averaging))
+
+    def check_sensor(self, timeout_ms: int = SENSOR_CHECK_TIMEOUT_MS) -> Optional[bool]:
+        """Ask the meter which sensor head is attached (quick, short timeout).
+
+        Updates device_info. Returns True/False for sensor present/absent,
+        None if the meter didn't answer or the reply was unclear.
+        """
+        with self._lock:
+            if not self.connected or self.instrument is None:
+                return None
+            old_timeout = self.instrument.timeout
+            try:
+                self.instrument.timeout = timeout_ms
+                idn = self.instrument.query("SYST:SENS:IDN?").strip()
+            except Exception as e:
+                logging.debug(f"{self.resource_name}: sensor check failed: {e}")
+                try:
+                    self.instrument.clear()
+                except Exception:
+                    pass
+                return None
+            finally:
+                try:
+                    self.instrument.timeout = old_timeout
+                except Exception:
+                    pass
+        self.device_info = idn
+        return sensor_idn_present(idn)
 
     @property
     def serial(self) -> str:
@@ -319,6 +390,18 @@ class SimulatedPowerMeter(PowerMeter):
             * self.SPLIT_FRACTIONS[index % len(self.SPLIT_FRACTIONS)]
         )
         self._serial = f"SIM{index + 1:04d}"
+        self.sensor_connected = True   # set False to simulate an unplugged head
+
+    def _sensor_idn(self) -> str:
+        if self.sensor_connected:
+            return f"S120C (simulated),{self._serial},01-Jan-2026,1,18,289"
+        return "no sensor,0,0,0,0,0"
+
+    def check_sensor(self, timeout_ms: int = SENSOR_CHECK_TIMEOUT_MS) -> Optional[bool]:
+        if not self.connected:
+            return None
+        self.device_info = self._sensor_idn()
+        return self.sensor_connected
 
     def connect(self):
         self.device_info = f"Thorlabs,PM100USB,{self._serial},1.0 (simulated)"
@@ -341,6 +424,8 @@ class SimulatedPowerMeter(PowerMeter):
     def read_power(self) -> float:
         if not self.connected:
             raise PowerMeterError("Not connected to power meter")
+        if not self.sensor_connected:
+            raise PowerMeterError("Failed to read power: timeout (simulated, no sensor)")
         # ±2% sinusoidal drift (30 s period) so the display visibly changes
         drift = 1.0 + 0.02 * math.sin(2.0 * math.pi * time.time() / 30.0)
         # 1% Gaussian noise, reduced by averaging like a real meter
@@ -575,6 +660,9 @@ class PowerMeterController:
         raw_ref, _, target = self.read_meters()
 
         if raw_ref is None or target is None:
+            faults = self.meter_faults()
+            if faults:
+                raise PowerMeterError(f"Cannot calibrate: {faults[0]}")
             raise PowerMeterError("Both meters must be connected to calibrate")
         if raw_ref <= 0:
             raise PowerMeterError("Reference power must be positive to calibrate")
@@ -585,9 +673,54 @@ class PowerMeterController:
         logging.info(f"Calibrated: factor = {factor:.6f} (target={target:.6e}, ref={raw_ref:.6e})")
         return factor
 
+    def _read_meter(self, pm: PowerMeter) -> Optional[float]:
+        """Read one meter, backing off while it is faulted.
+
+        A meter without its sensor head never answers MEAS:POW?, so every
+        read would wait out the VISA timeout while holding the meter. After
+        a failure the meter is marked faulted (pm.fault) and only a quick
+        sensor check runs every FAULT_RETRY_S until readings work again.
+        """
+        now = time.monotonic()
+        if pm.fault:
+            if now < pm.retry_at:
+                return None
+            if pm.check_sensor() is False:
+                pm.fault = NO_SENSOR_FAULT
+                pm.retry_at = time.monotonic() + FAULT_RETRY_S
+                return None
+        try:
+            value = pm.read_power()
+        except PowerMeterError as e:
+            first = not pm.fault
+            present = pm.check_sensor()
+            pm.fault = NO_SENSOR_FAULT if present is False else READ_FAULT
+            pm.retry_at = time.monotonic() + FAULT_RETRY_S
+            if first:
+                logging.warning(
+                    f"{pm.get_short_name()}: {pm.fault} ({e}; sensor: {pm.device_info!r})"
+                )
+            return None
+        if pm.fault:
+            logging.info(f"{pm.get_short_name()}: readings restored ({pm.device_info})")
+            pm.fault = ""
+            try:
+                # A (possibly different) head was plugged in: re-apply settings
+                pm.configure_default_settings()
+            except PowerMeterError as e:
+                logging.warning(f"{pm.get_short_name()}: could not re-apply settings: {e}")
+        return value
+
+    def meter_faults(self) -> List[str]:
+        """Fault messages for connected meters that currently can't read."""
+        return [pm.fault for pm in self.power_meters if pm.fault]
+
     def read_meters(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         """
         Read power from both meters with calibration applied to reference.
+
+        A meter that can't read (e.g. sensor head unplugged) gives None and
+        is retried every FAULT_RETRY_S; see _read_meter() and PowerMeter.fault.
 
         Returns:
             Tuple of (raw_reference_power, corrected_reference_power, target_power) in Watts.
@@ -598,17 +731,12 @@ class PowerMeterController:
         target_power = None
 
         if self.reference_meter and self.reference_meter.connected:
-            try:
-                raw_ref = self.reference_meter.read_power()
+            raw_ref = self._read_meter(self.reference_meter)
+            if raw_ref is not None:
                 corrected_ref = raw_ref * self.calibration_factor
-            except PowerMeterError as e:
-                logging.error(f"Error reading reference meter: {str(e)}")
 
         if self.target_meter and self.target_meter.connected:
-            try:
-                target_power = self.target_meter.read_power()
-            except PowerMeterError as e:
-                logging.error(f"Error reading target meter: {str(e)}")
+            target_power = self._read_meter(self.target_meter)
 
         return raw_ref, corrected_ref, target_power
 

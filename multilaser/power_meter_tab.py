@@ -257,6 +257,15 @@ class PowerDisplay(QWidget):
         self.raw_label.setVisible(False)
         layout.addWidget(self.raw_label)
 
+        # Fault (e.g. sensor head unplugged) - hidden while readings work
+        self.fault_label = QLabel("")
+        self.fault_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        self.fault_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.fault_label.setWordWrap(True)
+        self.fault_label.setStyleSheet("color: #e74c3c;")
+        self.fault_label.setVisible(False)
+        layout.addWidget(self.fault_label)
+
         # Device info
         self.device_label = QLabel("Not connected")
         self.device_label.setFont(QFont("Arial", 8))
@@ -289,6 +298,19 @@ class PowerDisplay(QWidget):
     def set_device_info(self, info: str):
         """Set the device information text"""
         self.device_label.setText(info)
+
+    def set_fault(self, message: str):
+        """Show why this meter has no reading ("" clears it)"""
+        if message == self.fault_label.text():
+            return
+        self.fault_label.setText(message)
+        self.fault_label.setVisible(bool(message))
+        self.power_label.setStyleSheet(
+            self.power_label.styleSheet().replace(
+                "color: #00ff00;" if message else "color: #e74c3c;",
+                "color: #e74c3c;" if message else "color: #00ff00;",
+            )
+        )
 
 
 class PowerMeterTab(QWidget):
@@ -1211,6 +1233,8 @@ class PowerMeterTab(QWidget):
         self.target_display.update_power(None)
         self.ref_display.set_device_info("Not connected")
         self.target_display.set_device_info("Not connected")
+        self.ref_display.set_fault("")
+        self.target_display.set_fault("")
         self.ref_display.set_raw_info(None)
 
         self._last_corrected_ref = None
@@ -1302,6 +1326,7 @@ class PowerMeterTab(QWidget):
                 has_both = ref_index is not None and target_index is not None
                 self.calibrate_btn.setEnabled(has_both)
                 self.known_meters_changed.emit()
+                self._show_meter_faults()
 
             except PowerMeterError as e:
                 QMessageBox.critical(
@@ -1505,10 +1530,25 @@ class PowerMeterTab(QWidget):
         )
         self._reload_measurement_table()
 
+    def _show_meter_faults(self):
+        """Show each assigned meter's fault (e.g. no sensor head) on its display."""
+        for display, pm in (
+            (self.ref_display, self.controller.reference_meter),
+            (self.target_display, self.controller.target_meter),
+        ):
+            fault = pm.fault if pm is not None else ""
+            if fault != display.fault_label.text():
+                display.set_fault(fault)
+                if pm is not None:
+                    # Sensor details change when a head is unplugged/swapped
+                    display.set_device_info(self._meter_info(pm))
+
     def _on_poll_timing(self, elapsed_s: float, interval_s: float):
         """Note once per connection when the meters can't keep up."""
         if self._slow_read_noted or elapsed_s <= interval_s * 1.2:
             return
+        if self.controller.meter_faults():
+            return  # slow because a read failed, not because the meters are slow
         self._slow_read_noted = True
         rate = 1.0 / elapsed_s
         logging.getLogger(__name__).info(
@@ -1544,6 +1584,7 @@ class PowerMeterTab(QWidget):
             # Show corrected reference as main display
             self.ref_display.update_power(corrected_ref)
             self.target_display.update_power(target_power)
+            self._show_meter_faults()
 
             # Show raw reference when calibration is active
             if self.controller.calibration_factor != 1.0 and raw_ref is not None:
