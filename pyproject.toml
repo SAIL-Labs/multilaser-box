@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multilaser-controller"
+dynamic = ["version"]
+description = "A Python-based graphical interface for controlling multiple lasers and Thorlabs power meters"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "Kok-Wei Bong"}, {name = "Chris Betters"}]
+requires-python = ">=3.7"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "numpy",
+    "pyserial>=3.5",
+    "PyQt6>=6.0",
+    # Self-update runtime. Keep equal to VPK_VERSION in
+    # .github/workflows/build-executables.yml. Only used by the packaged app.
+    "velopack==1.2.161; python_version >= '3.8'",
+]
+
+[project.optional-dependencies]
+powermeter = [
+    "pyvisa>=1.11.0",
+    "pyvisa-py>=0.5.0",
+    "openpyxl>=3.0",  # Excel measurement logging
+]
+dev = [
+    "pyinstaller",
+    "pytest",
+]
+
+[project.urls]
+Homepage = "https://github.com/SAIL-Labs/multilaser-box"
+
+[project.scripts]
+multilaser-gui = "multilaser.laser_controller_gui:main"
+multilaser = "multilaser.laser_controller_gui:main"
+
+[tool.setuptools.packages.find]
+include = ["multilaser*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "multilaser._version.__version__"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

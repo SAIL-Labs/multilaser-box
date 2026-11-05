@@ -1,19 +1,25 @@
-name: Build Standalone Executables
+name: Build and Release (Windows)
+
+# Pushing tag vX.Y.Z runs the tests, builds the app with PyInstaller (one-folder),
+# packs it with Velopack and publishes the GitHub release that installed copies
+# update from. A manual run builds the same files as a workflow artifact only.
 
 on:
   push:
     tags:
-      - 'v*'  # Trigger on version tags like v1.0.0
-  workflow_dispatch:  # Allow manual trigger
-    inputs:
-      version:
-        description: 'Version number (e.g., 1.0.0)'
-        required: false
-        default: 'dev'
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  # Keep equal to the velopack==... pin in pyproject.toml
+  VPK_VERSION: "1.2.161"
+  APP_ID: MultiLaserController
 
 jobs:
-  build-windows:
+  build:
     runs-on: windows-latest
+    permissions:
+      contents: write
     defaults:
       run:
         shell: pwsh
@@ -29,75 +35,79 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install numpy pyserial PyQt6 pyvisa pyvisa-py psutil pyinstaller pyusb certifi openpyxl
+          python -m pip install --upgrade pip
+          pip install -e ".[powermeter,dev]" psutil pyusb certifi
 
-      - name: Set version for build from git tag
+      - name: Check version against tag
         run: |
-          # Extract version from tag (refs/tags/v0.6.6 -> 0.6.6)
-          # For manual dispatch, fall back to VERSION file or 'dev'
-          if ("${{ github.ref_name }}" -match '^v') {
-            $version = "${{ github.ref_name }}".TrimStart('v')
-          } elseif (Test-Path VERSION) {
-            $version = (Get-Content VERSION -Raw).Trim()
-          } else {
-            $version = "${{ github.event.inputs.version }}"
-            if (-not $version) { $version = "dev" }
+          $version = python -c "from multilaser._version import __version__; print(__version__)"
+          if ("${{ github.ref_type }}" -eq "tag") {
+            if ("${{ github.ref_name }}" -ne "v$version") {
+              Write-Error "Tag ${{ github.ref_name }} does not match multilaser/_version.py (v$version). Bump __version__ and re-tag."
+              exit 1
+            }
           }
-          Set-Content -Path multilaser/_version.py -Value "__version__ = `"$version`""
           Write-Host "Building version: $version"
           echo "VERSION=$version" >> $env:GITHUB_ENV
 
-      - name: Build Windows executable
-        run: |
-          pyinstaller --onefile --windowed --name="MultiLaserController-v$env:VERSION" --icon=figures/icon.ico --add-data="figures/icon.ico;figures" --hidden-import=pyvisa --hidden-import=pyvisa_py --hidden-import=openpyxl multilaser/laser_controller_gui.py
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
 
-      - name: Package Windows artifacts
-        run: |
-          mkdir -p release/windows
-          copy dist\MultiLaserController-v*.exe release\windows\
-          copy README.md release\windows\
-          copy docs/multilaser_manual.md release\windows\
-          xcopy /E /I laser_ttl_controller release\windows\laser_ttl_controller
+      - name: Build with PyInstaller (one-folder)
+        run: pyinstaller multilaser.spec --noconfirm
 
-      - name: Upload Windows artifact
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Pack installer with Velopack
+        run: |
+          dotnet tool install -g vpk --version $env:VPK_VERSION
+          vpk pack `
+            --packId $env:APP_ID `
+            --packVersion $env:VERSION `
+            --packDir "dist/$env:APP_ID" `
+            --mainExe "$env:APP_ID.exe" `
+            --packTitle "Multi-Laser Controller" `
+            --packAuthors "Kok-Wei Bong, Chris Betters" `
+            --icon figures/icon.ico `
+            --outputDir Releases
+          Get-ChildItem Releases
+
+      # Copies older than the Velopack switch (<= v1.0.0) look for this zip and
+      # copy the first MultiLaserController-v*.exe inside it next to themselves.
+      # Shipping the installer under that name moves them over in one step.
+      - name: Build bridge zip for pre-installer versions
+        run: |
+          New-Item -ItemType Directory -Force bridge | Out-Null
+          Copy-Item "Releases/$env:APP_ID-win-Setup.exe" "bridge/$env:APP_ID-v$env:VERSION-Setup.exe"
+          Copy-Item README.md, docs/multilaser_manual.md bridge/
+          Copy-Item -Recurse laser_ttl_controller bridge/
+          Compress-Archive -Path bridge/* -DestinationPath "Releases/$env:APP_ID-Windows.zip"
+
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MultiLaserController-Windows
-          path: release/windows/
+          name: MultiLaserController-Windows-${{ env.VERSION }}
+          path: Releases/
 
-  create-release:
-    needs: [build-windows]
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Publish GitHub release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
         with:
-          fetch-depth: 0  # Full history for release notes
-
-      - name: Download Windows artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: MultiLaserController-Windows
-          path: windows-release/
-
-      - name: Create release archives
-        run: |
-          cd windows-release && zip -r ../MultiLaserController-Windows.zip . && cd ..
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            MultiLaserController-Windows.zip
+          files: Releases/*
           generate_release_notes: true
           body: |
-            ## Installation
-            1. Download `MultiLaserController-Windows.zip`
-            2. Extract and run the `.exe` file
+            ## Install (Windows)
+            Download and run **`MultiLaserController-win-Setup.exe`**. No admin rights are needed; it installs for your user account, adds a Start menu shortcut and updates itself from now on.
 
-            ## Changes
+            Prefer not to install? Use **`MultiLaserController-win-Portable.zip`**: extract it anywhere and run `MultiLaserController.exe`. It updates itself too.
+
+            Upgrading from v1.0.0 or earlier? Install once with the Setup.exe (your old copy's "Update Now" downloads it for you). You can then delete the old exe.
+
+            The other files (`.nupkg`, `releases.win.json`, `assets.win.json`, `RELEASES`, `MultiLaserController-Windows.zip`) are what installed copies update from; please leave them on the release.
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
