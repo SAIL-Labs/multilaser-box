@@ -1,4 +1,0 @@
-# Development version reference (optional)
-# For releases, git tags are the authoritative source
-# GitHub Actions extracts version from tag, not this file
-1.0.0

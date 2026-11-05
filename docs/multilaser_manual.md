@@ -810,6 +810,8 @@ If all tests pass, the firmware is correctly configured and ready for GUI operat
 
 ## 5.1 Creating a Standalone Executable (Optional)
 
+> **Most users don't need this.** Each GitHub release has a ready-made Windows installer (`MultiLaserController-win-Setup.exe`) and a Portable zip, both of which update themselves. The official build uses `multilaser.spec` (one-folder) and Velopack; see the README's *Building Executables* section. The steps below describe a simple one-file build for other platforms or local testing.
+
 For deployment to computers without Python installed, you can compile the GUI into a standalone executable using PyInstaller.
 
 ### Why Create an Executable?

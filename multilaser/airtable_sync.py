@@ -15,7 +15,7 @@ Talks to the SAIL "Lantern Manufacture" Airtable base:
   is safe.
 
 Requires a personal access token (PAT) scoped to data.records:read/write
-on this base. Uses only the standard library (urllib), like updater.py.
+on this base. Uses only the standard library (urllib).
 
 Author: Multi-Laser Box Project
 Date: 2026-08-20
