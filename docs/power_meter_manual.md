@@ -75,7 +75,31 @@ Without openpyxl, measurement logging still works but only in CSV format.
   "Calibrate Now" records the PMREF (uW) and Launch (mW) cells, and each
   logged measurement writes the target power (mW) and raw reference (uW)
   into the current port's row — re-logging a port overwrites it (after
-  a confirmation). The sheet is chosen by the current wavelength setting
+  a confirmation)
+- **Wavelength**: every log is filed under the wavelength the power meters
+  are actually set to, which may be an external source rather than one of
+  the box's lasers (type it in the Wavelength box and click Apply).
+  - Excel logs keep **one sheet per wavelength** (`wave_1310` in throughput
+    logs, `1310 nm` in report logs; the report's cell B16 holds it too). A
+    sheet is added automatically the first time you log at a new
+    wavelength, e.g. `980 nm`, and a new report file includes a sheet for
+    the current wavelength alongside the standard 1550/1310/1064 nm ones.
+    Data always goes to the sheet for that exact wavelength (previously a
+    non-standard wavelength was filed on the nearest sheet)
+  - If the Wavelength box holds a value that was never applied, Log
+    Measurement asks whether to apply it first or log at the meters'
+    current wavelength
+  - The measurements table shows the sheet for the meters' wavelength
+- **Instrument serials**: each measurement records the reference and target
+  power meter serial numbers and their sensor heads (model and serial):
+  - throughput logs: per-row columns V-AC (timestamp, wavelength, ref
+    meter S/N, ref sensor, ref sensor S/N, target meter S/N, target
+    sensor, target sensor S/N)
+  - report logs: rows 12-13 of each sheet's header block, updated on each
+    log and on Calibrate Now
+  - CSV logs: extra columns `ref_meter_sn`, `ref_sensor`, `ref_sensor_sn`,
+    `target_meter_sn`, `target_sensor`, `target_sensor_sn` (older CSV files
+    keep their shorter header; new rows simply carry the extra values)
 - CSV logs include a timestamp, wavelength, and throughput/loss computed
   at log time
 - Each logged value is the average of fresh readings collected after

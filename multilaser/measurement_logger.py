@@ -11,10 +11,21 @@ Two Excel layouts are supported, both generated programmatically:
 
 - "report": the SAIL Lantern Test Report layout. One sheet per wavelength
   (1550/1310/1064 nm), each with a header block (Lantern S/N, sources,
-  PMREF in B17 [uW], Launch power in B18 [mW]) and a port-keyed table
-  (rows 22-40 = ports 1-19) holding Throughput (mW) in C and the raw
-  reference reading (uW) in D; formulas compute calibrated insertion loss
-  and throughput as C/(B18*D/B17). Logging a port again overwrites its row.
+  power meter / sensor serials in rows 12-13, PMREF in B17 [uW], Launch
+  power in B18 [mW]) and a port-keyed table (rows 22-40 = ports 1-19)
+  holding Throughput (mW) in C and the raw reference reading (uW) in D;
+  formulas compute calibrated insertion loss and throughput as
+  C/(B18*D/B17). Logging a port again overwrites its row.
+
+Sheets are per wavelength, and the wavelength is the one the power meters
+are actually set to (which may be an external source, not one of the
+box's lasers). Writing at a wavelength with no sheet yet adds one; reading
+a wavelength with no sheet returns nothing (no "nearest sheet" fallback,
+which used to file e.g. 980 nm data on the 1064 nm sheet).
+
+Each logged measurement also records the reference and target power meter
+serials and their sensor heads (model and serial): in extra columns for
+throughput/CSV logs, and in the sheet header block for report logs.
 
 CSV logs store the throughput-layout data with throughput and loss computed
 at log time.
@@ -29,9 +40,10 @@ Date: 2026-07-13
 import csv
 import logging
 import math
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +66,35 @@ CSV_HEADER = [
     "loss_percent",
     "loss_dB",
     "wavelength_nm",
+    "ref_meter_sn",
+    "ref_sensor",
+    "ref_sensor_sn",
+    "target_meter_sn",
+    "target_sensor",
+    "target_sensor_sn",
 ]
+
+ROLES = ("reference", "target")
+
+
+@dataclass
+class MeterIdentity:
+    """Which instrument took a reading: meter body and its sensor head."""
+    meter_serial: str = ""
+    sensor_model: str = ""
+    sensor_serial: str = ""
+
+    def cells(self):
+        return [self.meter_serial, self.sensor_model, self.sensor_serial]
+
+
+def _identity_cells(meters: Optional[Dict[str, MeterIdentity]]):
+    """Six values: reference then target (meter S/N, sensor, sensor S/N)."""
+    meters = meters or {}
+    out = []
+    for role in ROLES:
+        out += (meters.get(role) or MeterIdentity()).cells()
+    return out
 
 # Throughput worksheet layout constants (1-indexed openpyxl columns)
 COL_TRIAL = 1  # A
@@ -87,6 +127,19 @@ XLSX_HEADERS = {
     "T1": "Overall Average dB",
 }
 
+# Per-row extras after the summary block (column V onwards)
+XLSX_EXTRA_FIRST_COL = 22  # V
+XLSX_EXTRA_HEADERS = [
+    "timestamp",
+    "wavelength (nm)",
+    "ref meter S/N",
+    "ref sensor",
+    "ref sensor S/N",
+    "target meter S/N",
+    "target sensor",
+    "target sensor S/N",
+]
+
 XLSX_COLUMN_WIDTHS = {
     "C": 24.5,
     "D": 21.2,
@@ -108,6 +161,9 @@ REPORT_COL_PORT = 1  # A
 REPORT_COL_CONNECTOR = 2  # B
 REPORT_COL_OUTPUT_MW = 3  # C: lantern output "Throughput (mW)"
 REPORT_COL_REF_UW = 4  # D: raw reference reading (uW)
+# Instruments used (rows 12-13, below "Power Meters: 2x PM100 USB")
+REPORT_METER_ROWS = {"reference": 12, "target": 13}
+REPORT_METER_LABELS = {"reference": "Reference (PMREF)", "target": "Target (PM1)"}
 
 REPORT_COLUMN_WIDTHS = {
     "A": 12.9,
@@ -171,13 +227,14 @@ class MeasurementLogger:
 
         Excel logs are generated with the throughput worksheet layout on a
         sheet named 'wave_<wavelength>', or with the Lantern Test Report
-        layout (layout='report', one sheet per wavelength, optional lantern
+        layout (layout='report': the standard 1550/1310/1064 nm sheets plus
+        one for wavelength_nm if it isn't among them; optional lantern
         serial number). CSV logs are created with a header row.
         """
         if self.format == "xlsx":
             if layout == "report":
                 self.layout = "report"
-                self._create_report_xlsx(serial)
+                self._create_report_xlsx(serial, wavelength_nm)
             else:
                 self.layout = "throughput"
                 self._create_xlsx(wavelength_nm)
@@ -192,28 +249,38 @@ class MeasurementLogger:
         output_power_w: Optional[float],
         wavelength_nm: Optional[int] = None,
         raw_reference_w: Optional[float] = None,
+        meters: Optional[Dict[str, MeterIdentity]] = None,
     ) -> int:
         """Record one measurement and return its trial (or port) number.
 
         Throughput/CSV logs append a new trial row using the corrected
-        injection power. Report logs write output power (mW) and the raw
-        reference reading (uW) into the port's row on the sheet nearest
-        wavelength_nm, overwriting any previous values for that port.
+        injection power, on the wavelength_nm sheet (added if missing).
+        Report logs write output power (mW) and the raw reference reading
+        (uW) into the port's row on the wavelength_nm sheet (added if
+        missing), overwriting any previous values for that port.
+
+        meters maps "reference"/"target" to the MeterIdentity that took the
+        reading; recorded alongside the measurement.
         """
         if self.format == "xlsx":
             if self._resolve_layout() == "report":
                 return self._append_report_xlsx(
-                    port, output_power_w, raw_reference_w, wavelength_nm
+                    port, output_power_w, raw_reference_w, wavelength_nm, meters
                 )
-            return self._append_xlsx(port, injection_power_w, output_power_w)
-        return self._append_csv(port, injection_power_w, output_power_w, wavelength_nm)
+            return self._append_xlsx(
+                port, injection_power_w, output_power_w, wavelength_nm, meters
+            )
+        return self._append_csv(
+            port, injection_power_w, output_power_w, wavelength_nm, meters
+        )
 
     def read_measurements(self, wavelength_nm: Optional[int] = None):
         """Return logged measurements as (trial, port, injection_w, output_w) tuples.
 
         Returns an empty list if the file does not exist yet. Rows with no
-        data in the trial/port/power columns are skipped. For report logs,
-        rows come from the sheet nearest wavelength_nm (first sheet if None),
+        data in the trial/port/power columns are skipped. Excel rows come
+        from the wavelength_nm sheet (none if it has no sheet; first sheet if
+        wavelength_nm is None). For report logs,
         injection power is derived from the sheet's Launch/PMREF cells, and
         each tuple carries a 5th element: the raw reference reading (W)
         stored in the sheet.
@@ -223,7 +290,7 @@ class MeasurementLogger:
         if self.format == "xlsx":
             if self._resolve_layout() == "report":
                 return self._read_report_xlsx(wavelength_nm)
-            return self._read_xlsx()
+            return self._read_xlsx(wavelength_nm)
         return self._read_csv()
 
     def _resolve_layout(self) -> str:
@@ -255,6 +322,30 @@ class MeasurementLogger:
         except Exception as e:
             raise MeasurementLogError(f"Failed to open log file:\n{str(e)}")
 
+    # === Sheet selection (both Excel layouts) ===
+
+    @staticmethod
+    def _sheet_wavelength(ws) -> Optional[int]:
+        """Wavelength a sheet is for, from its title ("1310 nm", "wave_1310")"""
+        digits = "".join(ch for ch in ws.title if ch.isdigit())
+        return int(digits) if digits else None
+
+    @classmethod
+    def _find_sheet(cls, wb, wavelength_nm: Optional[int]):
+        """The sheet for exactly wavelength_nm, or None.
+
+        With wavelength_nm None: the first sheet. A workbook whose only sheet
+        has no wavelength in its title (older throughput logs) always uses it.
+        """
+        if wavelength_nm is None:
+            return wb.worksheets[0]
+        for ws in wb.worksheets:
+            if cls._sheet_wavelength(ws) == int(wavelength_nm):
+                return ws
+        if len(wb.worksheets) == 1 and cls._sheet_wavelength(wb.worksheets[0]) is None:
+            return wb.worksheets[0]
+        return None
+
     # === Excel implementation ===
 
     def _create_xlsx(self, wavelength_nm: Optional[int]):
@@ -263,6 +354,17 @@ class MeasurementLogger:
         wb.calculation.fullCalcOnLoad = True
         ws = wb.active
         ws.title = f"wave_{wavelength_nm}" if wavelength_nm else "throughput"
+        self._write_throughput_sheet(ws)
+
+        try:
+            wb.save(self.file_path)
+        except PermissionError:
+            raise MeasurementLogError(self._locked_file_message())
+        except OSError as e:
+            raise MeasurementLogError(f"Failed to create log file:\n{str(e)}")
+
+    def _write_throughput_sheet(self, ws):
+        """Write headers, formulas and the summary block of a throughput sheet"""
 
         header_font = Font(bold=True)
         for coord, header in XLSX_HEADERS.items():
@@ -303,12 +405,14 @@ class MeasurementLogger:
         for coord, fmt in (("Q2", "0.0%"), ("R2", "0.0%"), ("S2", "0.0%"), ("T2", "0.00")):
             ws[coord].number_format = fmt
 
-        try:
-            wb.save(self.file_path)
-        except PermissionError:
-            raise MeasurementLogError(self._locked_file_message())
-        except OSError as e:
-            raise MeasurementLogError(f"Failed to create log file:\n{str(e)}")
+        self._write_extra_headers(ws)
+
+    @staticmethod
+    def _write_extra_headers(ws):
+        header_font = Font(bold=True)
+        for i, header in enumerate(XLSX_EXTRA_HEADERS):
+            cell = ws.cell(row=1, column=XLSX_EXTRA_FIRST_COL + i, value=header)
+            cell.font = header_font
 
     @staticmethod
     def _write_row_formulas(ws, row: int):
@@ -325,6 +429,8 @@ class MeasurementLogger:
         port: int,
         injection_power_w: Optional[float],
         output_power_w: Optional[float],
+        wavelength_nm: Optional[int] = None,
+        meters: Optional[Dict[str, MeterIdentity]] = None,
     ) -> int:
         if not self.file_path.exists():
             raise MeasurementLogError(f"Log file not found: {self.file_path}")
@@ -335,7 +441,13 @@ class MeasurementLogger:
         except Exception as e:
             raise MeasurementLogError(f"Failed to open log file:\n{str(e)}")
 
-        ws = wb.worksheets[0]
+        ws = self._find_sheet(wb, wavelength_nm)
+        if ws is None:
+            ws = wb.create_sheet(f"wave_{wavelength_nm}")
+            self._write_throughput_sheet(ws)
+            logger.info(f"Added sheet '{ws.title}' to {self.file_path.name}")
+        elif ws.cell(row=1, column=XLSX_EXTRA_FIRST_COL).value is None:
+            self._write_extra_headers(ws)  # sheet from before these columns
 
         # Find the last row containing data in columns A-D and the highest
         # trial number so far (tolerates blank spacer rows in the template)
@@ -364,6 +476,14 @@ class MeasurementLogger:
         if ws.cell(row=next_row, column=COL_THROUGHPUT).value is None:
             self._write_row_formulas(ws, next_row)
 
+        extras = [
+            datetime.now().isoformat(timespec="seconds"),
+            wavelength_nm,
+        ] + _identity_cells(meters)
+        for i, value in enumerate(extras):
+            if value not in (None, ""):
+                ws.cell(row=next_row, column=XLSX_EXTRA_FIRST_COL + i, value=value)
+
         try:
             wb.save(self.file_path)
         except PermissionError:
@@ -372,11 +492,12 @@ class MeasurementLogger:
             raise MeasurementLogError(f"Failed to save log file:\n{str(e)}")
 
         logger.info(
-            f"Logged trial {trial} (port {port}) to {self.file_path.name}"
+            f"Logged trial {trial} (port {port}) to sheet '{ws.title}' of "
+            f"{self.file_path.name}"
         )
         return trial
 
-    def _read_xlsx(self):
+    def _read_xlsx(self, wavelength_nm: Optional[int] = None):
         try:
             wb = openpyxl.load_workbook(self.file_path, read_only=True, data_only=True)
         except PermissionError:
@@ -385,7 +506,9 @@ class MeasurementLogger:
             raise MeasurementLogError(f"Failed to open log file:\n{str(e)}")
 
         try:
-            ws = wb.worksheets[0]
+            ws = self._find_sheet(wb, wavelength_nm)
+            if ws is None:
+                return []
             rows = []
             for row in ws.iter_rows(
                 min_row=FIRST_DATA_ROW,
@@ -402,30 +525,49 @@ class MeasurementLogger:
 
     # === Lantern Test Report implementation ===
 
-    @staticmethod
-    def _report_sheet(wb, wavelength_nm: Optional[int]):
-        """Return the report sheet whose wavelength is nearest wavelength_nm"""
-        best = None
-        best_diff = None
-        for ws in wb.worksheets:
-            digits = "".join(ch for ch in ws.title if ch.isdigit())
-            if not digits:
-                continue
-            if wavelength_nm is None:
-                return ws
-            diff = abs(int(digits) - wavelength_nm)
-            if best is None or diff < best_diff:
-                best, best_diff = ws, diff
-        return best if best is not None else wb.worksheets[0]
+    def _report_sheet(self, wb, wavelength_nm: Optional[int], create: bool = False):
+        """The report sheet for exactly wavelength_nm.
 
-    def _create_report_xlsx(self, serial: Optional[str]):
+        create=True adds a sheet (copying the lantern S/N from the first
+        sheet) when there is none; otherwise returns None.
+        """
+        ws = self._find_sheet(wb, wavelength_nm)
+        if ws is None and create:
+            serial = wb.worksheets[0]["B1"].value if wb.worksheets else None
+            ws = wb.create_sheet(f"{wavelength_nm} nm")
+            self._write_report_sheet(ws, int(wavelength_nm), serial)
+            logger.info(f"Added sheet '{ws.title}' to {self.file_path.name}")
+        return ws
+
+    @staticmethod
+    def _write_report_meters(ws, meters: Optional[Dict[str, MeterIdentity]]):
+        """Record the instruments in the header block (rows 12-13)"""
+        if not meters:
+            return
+        for role, row in REPORT_METER_ROWS.items():
+            ident = meters.get(role)
+            if ident is None:
+                continue
+            ws[f"A{row}"] = REPORT_METER_LABELS[role]
+            ws[f"B{row}"] = ident.meter_serial or None
+            ws[f"C{row}"] = (
+                f"sensor {ident.sensor_model}".strip() if ident.sensor_model else None
+            )
+            ws[f"D{row}"] = ident.sensor_serial or None
+
+    def _create_report_xlsx(
+        self, serial: Optional[str], wavelength_nm: Optional[int] = None
+    ):
         wb = openpyxl.Workbook()
         # openpyxl writes no cached formula results; make Excel recalculate
         wb.calculation.fullCalcOnLoad = True
         wb.remove(wb.active)
-        for wavelength_nm in REPORT_WAVELENGTHS_NM:
-            ws = wb.create_sheet(f"{wavelength_nm} nm")
-            self._write_report_sheet(ws, wavelength_nm, serial)
+        wavelengths = list(REPORT_WAVELENGTHS_NM)
+        if wavelength_nm and int(wavelength_nm) not in wavelengths:
+            wavelengths.insert(0, int(wavelength_nm))  # e.g. an external source
+        for wl in wavelengths:
+            ws = wb.create_sheet(f"{wl} nm")
+            self._write_report_sheet(ws, wl, serial)
 
         try:
             wb.save(self.file_path)
@@ -499,6 +641,7 @@ class MeasurementLogger:
         output_power_w: Optional[float],
         raw_reference_w: Optional[float],
         wavelength_nm: Optional[int],
+        meters: Optional[Dict[str, MeterIdentity]] = None,
     ) -> int:
         if not self.file_path.exists():
             raise MeasurementLogError(f"Log file not found: {self.file_path}")
@@ -509,7 +652,8 @@ class MeasurementLogger:
             )
 
         wb = self._load_workbook()
-        ws = self._report_sheet(wb, wavelength_nm)
+        ws = self._report_sheet(wb, wavelength_nm, create=True)
+        self._write_report_meters(ws, meters)
         row = REPORT_FIRST_PORT_ROW + port - 1
 
         ws.cell(row=row, column=REPORT_COL_PORT, value=port)
@@ -537,7 +681,7 @@ class MeasurementLogger:
         the sheet's wavelength (B16), pmref_uw (B17), launch_mw (B18) and
         ports: a list of (port, throughput_mW, reference_uW) tuples for
         ports that have both values recorded. Values are in the sheet's
-        native units. The sheet is chosen by wavelength_nm as elsewhere.
+        native units. The sheet is the one for wavelength_nm.
         """
         if self.format != "xlsx" or self._resolve_layout() != "report":
             raise MeasurementLogError(
@@ -549,6 +693,10 @@ class MeasurementLogger:
         wb = self._load_workbook(read_only=True)
         try:
             ws = self._report_sheet(wb, wavelength_nm)
+            if ws is None:
+                raise MeasurementLogError(
+                    f"This report has no {wavelength_nm} nm sheet yet"
+                )
             serial = ws["B1"].value
             sheet_wavelength = ws["B16"].value
             pmref_uw = ws[REPORT_PMREF_CELL].value
@@ -602,6 +750,8 @@ class MeasurementLogger:
         wb = self._load_workbook(read_only=True)
         try:
             ws = self._report_sheet(wb, wavelength_nm)
+            if ws is None:
+                return False
             row = REPORT_FIRST_PORT_ROW + port - 1
             return (
                 ws.cell(row=row, column=REPORT_COL_OUTPUT_MW).value is not None
@@ -611,7 +761,11 @@ class MeasurementLogger:
             wb.close()
 
     def set_report_calibration(
-        self, wavelength_nm: Optional[int], pmref_w: float, launch_w: float
+        self,
+        wavelength_nm: Optional[int],
+        pmref_w: float,
+        launch_w: float,
+        meters: Optional[Dict[str, MeterIdentity]] = None,
     ):
         """Write the PMREF (uW) and Launch (mW) cells of a report sheet.
 
@@ -625,7 +779,8 @@ class MeasurementLogger:
             )
 
         wb = self._load_workbook()
-        ws = self._report_sheet(wb, wavelength_nm)
+        ws = self._report_sheet(wb, wavelength_nm, create=True)
+        self._write_report_meters(ws, meters)
         ws[REPORT_PMREF_CELL] = pmref_w * 1e6
         ws[REPORT_LAUNCH_CELL] = launch_w * 1e3
 
@@ -652,6 +807,8 @@ class MeasurementLogger:
         wb = self._load_workbook(read_only=True)
         try:
             ws = self._report_sheet(wb, wavelength_nm)
+            if ws is None:
+                return None
             pmref_uw = ws[REPORT_PMREF_CELL].value
             launch_mw = ws[REPORT_LAUNCH_CELL].value
             if isinstance(pmref_uw, (int, float)) and isinstance(launch_mw, (int, float)):
@@ -664,6 +821,8 @@ class MeasurementLogger:
         wb = self._load_workbook(read_only=True)
         try:
             ws = self._report_sheet(wb, wavelength_nm)
+            if ws is None:
+                return []
             pmref_uw = ws[REPORT_PMREF_CELL].value
             launch_mw = ws[REPORT_LAUNCH_CELL].value
             have_calibration = (
@@ -710,6 +869,7 @@ class MeasurementLogger:
         injection_power_w: Optional[float],
         output_power_w: Optional[float],
         wavelength_nm: Optional[int],
+        meters: Optional[Dict[str, MeterIdentity]] = None,
     ) -> int:
         # Determine the next trial number from existing rows
         last_trial = 0
@@ -761,6 +921,7 @@ class MeasurementLogger:
                         fmt(loss_db, "{:.4f}"),
                         wavelength_nm if wavelength_nm is not None else "",
                     ]
+                    + _identity_cells(meters)
                 )
         except (PermissionError, OSError) as e:
             raise MeasurementLogError(f"Failed to write log file:\n{str(e)}")

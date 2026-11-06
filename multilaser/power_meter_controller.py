@@ -351,6 +351,37 @@ class PowerMeter:
         """
         return MeterCandidate.from_resource(self.resource_name).serial
 
+    def _sensor_fields(self) -> List[str]:
+        if sensor_idn_present(self.device_info) is not True:
+            return []
+        return [f.strip() for f in self.device_info.split(",")]
+
+    @property
+    def sensor_model(self) -> str:
+        """Sensor head model from SYST:SENS:IDN? (e.g. "S120C"), "" if none"""
+        fields = self._sensor_fields()
+        return fields[0] if fields else ""
+
+    @property
+    def sensor_serial(self) -> str:
+        """Sensor head serial number, "" if no head is attached"""
+        fields = self._sensor_fields()
+        return fields[1] if len(fields) > 1 else ""
+
+    @property
+    def wavelength_nm(self) -> int:
+        """Wavelength the meter is set to correct for (last value applied)"""
+        return self._wavelength
+
+    def identity(self):
+        """MeterIdentity (meter and sensor head serials) for measurement logs"""
+        from multilaser.measurement_logger import MeterIdentity
+        return MeterIdentity(
+            meter_serial=self.serial,
+            sensor_model=self.sensor_model,
+            sensor_serial=self.sensor_serial,
+        )
+
     def set_role(self, role: PowerMeterRole):
         """Set the role of this power meter"""
         self.role = role
@@ -404,7 +435,8 @@ class SimulatedPowerMeter(PowerMeter):
         return self.sensor_connected
 
     def connect(self):
-        self.device_info = f"Thorlabs,PM100USB,{self._serial},1.0 (simulated)"
+        # device_info is the sensor head identity, as for a real meter
+        self.device_info = self._sensor_idn()
         self.connected = True
         logging.info(f"Connected to simulated power meter: {self.device_info}")
 
@@ -710,6 +742,27 @@ class PowerMeterController:
             except PowerMeterError as e:
                 logging.warning(f"{pm.get_short_name()}: could not re-apply settings: {e}")
         return value
+
+    def applied_wavelength(self) -> Optional[int]:
+        """Wavelength the assigned meters are actually set to, or None.
+
+        This is what measurements are taken at - it may be an external
+        source rather than one of the box's lasers, and it can differ from
+        an unapplied value typed into the GUI. Target meter first.
+        """
+        for pm in (self.target_meter, self.reference_meter):
+            if pm is not None and pm.connected:
+                return pm.wavelength_nm
+        return None
+
+    def meter_identities(self) -> dict:
+        """{"reference"/"target": MeterIdentity} for the assigned meters"""
+        out = {}
+        if self.reference_meter is not None:
+            out["reference"] = self.reference_meter.identity()
+        if self.target_meter is not None:
+            out["target"] = self.target_meter.identity()
+        return out
 
     def meter_faults(self) -> List[str]:
         """Fault messages for connected meters that currently can't read."""
