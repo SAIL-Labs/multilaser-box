@@ -75,7 +75,31 @@ Without openpyxl, measurement logging still works but only in CSV format.
   "Calibrate Now" records the PMREF (uW) and Launch (mW) cells, and each
   logged measurement writes the target power (mW) and raw reference (uW)
   into the current port's row — re-logging a port overwrites it (after
-  a confirmation). The sheet is chosen by the current wavelength setting
+  a confirmation)
+- **Wavelength**: every log is filed under the wavelength the power meters
+  are actually set to, which may be an external source rather than one of
+  the box's lasers (type it in the Wavelength box and click Apply).
+  - Excel logs keep **one sheet per wavelength** (`wave_1310` in throughput
+    logs, `1310 nm` in report logs; the report's cell B16 holds it too). A
+    sheet is added automatically the first time you log at a new
+    wavelength, e.g. `980 nm`, and a new report file includes a sheet for
+    the current wavelength alongside the standard 1550/1310/1064 nm ones.
+    Data always goes to the sheet for that exact wavelength (previously a
+    non-standard wavelength was filed on the nearest sheet)
+  - If the Wavelength box holds a value that was never applied, Log
+    Measurement asks whether to apply it first or log at the meters'
+    current wavelength
+  - The measurements table shows the sheet for the meters' wavelength
+- **Instrument serials**: each measurement records the reference and target
+  power meter serial numbers and their sensor heads (model and serial):
+  - throughput logs: per-row columns V-AC (timestamp, wavelength, ref
+    meter S/N, ref sensor, ref sensor S/N, target meter S/N, target
+    sensor, target sensor S/N)
+  - report logs: rows 12-13 of each sheet's header block, updated on each
+    log and on Calibrate Now
+  - CSV logs: extra columns `ref_meter_sn`, `ref_sensor`, `ref_sensor_sn`,
+    `target_meter_sn`, `target_sensor`, `target_sensor_sn` (older CSV files
+    keep their shorter header; new rows simply carry the extra values)
 - CSV logs include a timestamp, wavelength, and throughput/loss computed
   at log time
 - Each logged value is the average of fresh readings collected after
@@ -279,6 +303,43 @@ meters at startup (see the Settings tab) and steps 4-6 can be skipped.
 - **Solution**: Update to v0.7.1 or later; non-Thorlabs instruments are now
   filtered out, and if you genuinely have more than two meters attached, a
   selection dialog lets you choose which ones to use
+
+### Meter Listed but Won't Connect (`VI_ERROR_RSRC_NFOUND`)
+- **Cause 1, wrong driver**: a PM100USB's measurement interface (TMC,
+  `MI_00`) can be bound to Thorlabs' own driver (Device Manager class
+  *ThorlabsUSBDevice*, service `WINUSB`) or to the VISA USBTMC driver
+  (*USB Test and Measurement Device (IVI)*, service `Usbtmc`). This app
+  talks to the meters through NI-VISA, which **only works with the USBTMC
+  driver**: the meter is still listed, but opening it fails.
+  **Fix**: switch the meter to the VISA/USBTMC driver with Thorlabs'
+  *Power Meter Driver Switcher* (installed with Optical Power Monitor).
+  Note Thorlabs' Optical Power Monitor software then needs the switch
+  reversed to use that meter
+- **Cause 2, not plugged in**: NI-VISA keeps listing meters it has seen
+  before. Those entries fail the same way and are shown as *NOT
+  RESPONDING* in the scan; they're harmless
+- The second interface each meter shows in Device Manager, *PM100USB
+  (Interface 1 DFU)*, is for firmware updates only. It is never a VISA
+  resource and can be left alone
+
+### "No sensor head connected" / "No reading from meter"
+- **Cause**: the photodiode head is unplugged from the meter (or not
+  answering). The meter then never replies to a power reading
+- **What the app does**: the affected display turns red and says why; the
+  other meter keeps reading. The app stops asking that meter for power
+  and just checks every 2 s whether a head is back, so nothing stalls.
+  When you plug a head in, readings resume by themselves and the
+  wavelength, averaging and auto-range settings are re-applied (a
+  different head can be fitted). Calibrate Now reports the fault
+  instead of a generic error
+- Meters connected without a head are flagged straight away
+
+### App Is Slow While Meters Are Connected
+- Readings now run on a background thread, so the window stays responsive
+  however slowly the meters answer
+- If the meters answer more slowly than the chosen update rate, the
+  status line says so (e.g. "meters answer in 180 ms, so updates run at
+  ~5 Hz"). Lower the averaging count or the update rate if needed
 
 ### The Same Meter Appears Twice
 - **Symptom**: a scan lists two entries for one meter (often with the

@@ -16,6 +16,7 @@ import logging
 import math
 import os
 import random
+import threading
 import time
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
@@ -76,6 +77,16 @@ class PowerMeterError(Exception):
 
 THORLABS_VID = 0x1313
 
+# What VI_ERROR_RSRC_NFOUND on a listed Thorlabs entry nearly always means:
+# NI-VISA remembers meters it has seen before (and lists them even when
+# unplugged), and it cannot open a meter whose TMC interface is bound to
+# Thorlabs' own WinUSB driver instead of the USBTMC (VISA) driver.
+RSRC_NFOUND_HINT = (
+    "not found by VISA - either not plugged in (VISA lists meters it has "
+    "seen before), or the meter is using the Thorlabs driver; switch it to "
+    "the VISA/USBTMC driver with Thorlabs' Power Meter Driver Switcher"
+)
+
 
 def _parse_int(text: str) -> Optional[int]:
     """Parse "0x1313" (NI-VISA) or "4883" (pyvisa-py) style numbers."""
@@ -132,6 +143,26 @@ class MeterCandidate:
         return f"0x{self.pid:04X}" if self.pid is not None else "?"
 
 
+NO_SENSOR_FAULT = "No sensor head connected - plug the photodiode into the meter"
+READ_FAULT = "No reading from meter - check the sensor head"
+FAULT_RETRY_S = 2.0          # while faulted, re-check this often
+SENSOR_CHECK_TIMEOUT_MS = 300
+
+
+def sensor_idn_present(idn: str) -> Optional[bool]:
+    """Interpret a SYST:SENS:IDN? reply ("S120C,<serial>,<cal date>,...").
+
+    Returns False when the meter reports no sensor head, True when it names
+    one, None when the reply can't be interpreted.
+    """
+    name = idn.split(",")[0].strip().lower() if idn else ""
+    if not name:
+        return None
+    if "no sensor" in name or name in ("none", "nosensor", "no_sensor"):
+        return False
+    return True
+
+
 class PowerMeter:
     """Individual power meter instance"""
 
@@ -152,56 +183,74 @@ class PowerMeter:
         self._wavelength = 1310  # Default wavelength in nm
         self._power_unit = "W"   # Default unit: Watts
         self._averaging = 1   # Default averaging samples
+        # Readings come from a background poller while settings changes come
+        # from the GUI thread; one VISA session must not interleave them.
+        self._lock = threading.RLock()
+        # Set when readings fail (typically the sensor head is unplugged);
+        # read_meters() then backs off instead of blocking on every poll
+        self.fault = ""
+        self.retry_at = 0.0
 
     def connect(self):
         """Connect to the power meter"""
-        try:
-            self.instrument = self.rm.open_resource(self.resource_name)
-            # Sensor head identity ("S120C,<serial>,...") - not the meter's
-            self.device_info = self.instrument.query("SYST:SENS:IDN?").strip()
-            self.connected = True
+        with self._lock:
+            try:
+                self.instrument = self.rm.open_resource(self.resource_name)
+                self.instrument.timeout = self._read_timeout_ms()
+                # Sensor head identity ("S120C,<serial>,...") - not the meter's
+                self.device_info = self.instrument.query("SYST:SENS:IDN?").strip()
+                self.connected = True
+                if sensor_idn_present(self.device_info) is False:
+                    # Connect anyway, but don't let the first poll time out
+                    self.fault = NO_SENSOR_FAULT
+                    self.retry_at = time.monotonic() + FAULT_RETRY_S
+                    logging.warning(
+                        f"{self.resource_name}: no sensor head ({self.device_info})"
+                    )
 
-            # Apply default settings
-            self.configure_default_settings()
+                # Apply default settings
+                self.configure_default_settings()
 
-            logging.info(f"Connected to power meter: {self.device_info}")
-        except Exception as e:
-            # Don't leave the session open: a later retry would find it busy
-            if self.instrument is not None:
-                try:
-                    self.instrument.close()
-                except Exception:
-                    pass
-                self.instrument = None
-            self.connected = False
-            raise PowerMeterError(f"Failed to connect to {self.resource_name}: {str(e)}")
+                logging.info(f"Connected to power meter: {self.device_info}")
+            except Exception as e:
+                # Don't leave the session open: a later retry would find it busy
+                if self.instrument is not None:
+                    try:
+                        self.instrument.close()
+                    except Exception:
+                        pass
+                    self.instrument = None
+                self.connected = False
+                raise PowerMeterError(f"Failed to connect to {self.resource_name}: {str(e)}")
 
     def disconnect(self):
         """Disconnect from the power meter"""
-        if self.instrument:
-            try:
-                self.instrument.close()
-                self.connected = False
-                logging.info(f"Disconnected from power meter: {self.device_info}")
-            except Exception as e:
-                logging.error(f"Error disconnecting: {str(e)}")
+        with self._lock:
+            if self.instrument:
+                try:
+                    self.instrument.close()
+                    self.connected = False
+                    logging.info(f"Disconnected from power meter: {self.device_info}")
+                except Exception as e:
+                    logging.error(f"Error disconnecting: {str(e)}")
 
     def configure_default_settings(self):
         """Configure default measurement settings"""
-        if not self.connected:
-            raise PowerMeterError("Not connected to power meter")
+        with self._lock:
+            if not self.connected:
+                raise PowerMeterError("Not connected to power meter")
 
-        try:
-            # Enable auto-ranging
-            self.instrument.write("SENS:RANGE:AUTO ON")
-            # Set wavelength
-            self.instrument.write(f"SENS:CORR:WAV {self._wavelength}")
-            # Set power unit
-            self.instrument.write(f"SENS:POW:UNIT {self._power_unit}")
-            # Set averaging
-            self.instrument.write(f"SENS:AVER:COUN {self._averaging}")
-        except Exception as e:
-            raise PowerMeterError(f"Failed to configure settings: {str(e)}")
+            try:
+                # Enable auto-ranging
+                self.instrument.write("SENS:RANGE:AUTO ON")
+                # Set wavelength
+                self.instrument.write(f"SENS:CORR:WAV {self._wavelength}")
+                # Set power unit
+                self.instrument.write(f"SENS:POW:UNIT {self._power_unit}")
+                # Set averaging
+                self.instrument.write(f"SENS:AVER:COUN {self._averaging}")
+            except Exception as e:
+                raise PowerMeterError(f"Failed to configure settings: {str(e)}")
 
     def set_wavelength(self, wavelength_nm: int):
         """
@@ -210,14 +259,15 @@ class PowerMeter:
         Args:
             wavelength_nm: Wavelength in nanometers
         """
-        if not self.connected:
-            raise PowerMeterError("Not connected to power meter")
+        with self._lock:
+            if not self.connected:
+                raise PowerMeterError("Not connected to power meter")
 
-        try:
-            self._wavelength = wavelength_nm
-            self.instrument.write(f"SENS:CORR:WAV {wavelength_nm}")
-        except Exception as e:
-            raise PowerMeterError(f"Failed to set wavelength: {str(e)}")
+            try:
+                self._wavelength = wavelength_nm
+                self.instrument.write(f"SENS:CORR:WAV {wavelength_nm}")
+            except Exception as e:
+                raise PowerMeterError(f"Failed to set wavelength: {str(e)}")
 
     def set_averaging(self, samples: int):
         """
@@ -226,14 +276,16 @@ class PowerMeter:
         Args:
             samples: Number of samples to average
         """
-        if not self.connected:
-            raise PowerMeterError("Not connected to power meter")
+        with self._lock:
+            if not self.connected:
+                raise PowerMeterError("Not connected to power meter")
 
-        try:
-            self._averaging = samples
-            self.instrument.write(f"SENS:AVER:COUN {samples}")
-        except Exception as e:
-            raise PowerMeterError(f"Failed to set averaging: {str(e)}")
+            try:
+                self._averaging = samples
+                self.instrument.write(f"SENS:AVER:COUN {samples}")
+                self.instrument.timeout = self._read_timeout_ms()
+            except Exception as e:
+                raise PowerMeterError(f"Failed to set averaging: {str(e)}")
 
     def read_power(self) -> float:
         """
@@ -242,14 +294,53 @@ class PowerMeter:
         Returns:
             Power reading in Watts
         """
-        if not self.connected:
-            raise PowerMeterError("Not connected to power meter")
+        with self._lock:
+            if not self.connected:
+                raise PowerMeterError("Not connected to power meter")
 
-        try:
-            power_str = self.instrument.query("MEAS:POW?").strip()
-            return float(power_str)
-        except Exception as e:
-            raise PowerMeterError(f"Failed to read power: {str(e)}")
+            try:
+                power_str = self.instrument.query("MEAS:POW?").strip()
+                return float(power_str)
+            except Exception as e:
+                # Flush whatever the meter may still send for this query
+                try:
+                    self.instrument.clear()
+                except Exception:
+                    pass
+                raise PowerMeterError(f"Failed to read power: {str(e)}")
+
+    def _read_timeout_ms(self) -> int:
+        """VISA timeout for a reading: generous for the averaging, but short
+        enough that a meter with no sensor head can't stall polling for long."""
+        return 1000 + 3 * max(1, int(self._averaging))
+
+    def check_sensor(self, timeout_ms: int = SENSOR_CHECK_TIMEOUT_MS) -> Optional[bool]:
+        """Ask the meter which sensor head is attached (quick, short timeout).
+
+        Updates device_info. Returns True/False for sensor present/absent,
+        None if the meter didn't answer or the reply was unclear.
+        """
+        with self._lock:
+            if not self.connected or self.instrument is None:
+                return None
+            old_timeout = self.instrument.timeout
+            try:
+                self.instrument.timeout = timeout_ms
+                idn = self.instrument.query("SYST:SENS:IDN?").strip()
+            except Exception as e:
+                logging.debug(f"{self.resource_name}: sensor check failed: {e}")
+                try:
+                    self.instrument.clear()
+                except Exception:
+                    pass
+                return None
+            finally:
+                try:
+                    self.instrument.timeout = old_timeout
+                except Exception:
+                    pass
+        self.device_info = idn
+        return sensor_idn_present(idn)
 
     @property
     def serial(self) -> str:
@@ -259,6 +350,37 @@ class PowerMeter:
         whereas device_info describes the (swappable) sensor head.
         """
         return MeterCandidate.from_resource(self.resource_name).serial
+
+    def _sensor_fields(self) -> List[str]:
+        if sensor_idn_present(self.device_info) is not True:
+            return []
+        return [f.strip() for f in self.device_info.split(",")]
+
+    @property
+    def sensor_model(self) -> str:
+        """Sensor head model from SYST:SENS:IDN? (e.g. "S120C"), "" if none"""
+        fields = self._sensor_fields()
+        return fields[0] if fields else ""
+
+    @property
+    def sensor_serial(self) -> str:
+        """Sensor head serial number, "" if no head is attached"""
+        fields = self._sensor_fields()
+        return fields[1] if len(fields) > 1 else ""
+
+    @property
+    def wavelength_nm(self) -> int:
+        """Wavelength the meter is set to correct for (last value applied)"""
+        return self._wavelength
+
+    def identity(self):
+        """MeterIdentity (meter and sensor head serials) for measurement logs"""
+        from multilaser.measurement_logger import MeterIdentity
+        return MeterIdentity(
+            meter_serial=self.serial,
+            sensor_model=self.sensor_model,
+            sensor_serial=self.sensor_serial,
+        )
 
     def set_role(self, role: PowerMeterRole):
         """Set the role of this power meter"""
@@ -299,9 +421,22 @@ class SimulatedPowerMeter(PowerMeter):
             * self.SPLIT_FRACTIONS[index % len(self.SPLIT_FRACTIONS)]
         )
         self._serial = f"SIM{index + 1:04d}"
+        self.sensor_connected = True   # set False to simulate an unplugged head
+
+    def _sensor_idn(self) -> str:
+        if self.sensor_connected:
+            return f"S120C (simulated),{self._serial},01-Jan-2026,1,18,289"
+        return "no sensor,0,0,0,0,0"
+
+    def check_sensor(self, timeout_ms: int = SENSOR_CHECK_TIMEOUT_MS) -> Optional[bool]:
+        if not self.connected:
+            return None
+        self.device_info = self._sensor_idn()
+        return self.sensor_connected
 
     def connect(self):
-        self.device_info = f"Thorlabs,PM100USB,{self._serial},1.0 (simulated)"
+        # device_info is the sensor head identity, as for a real meter
+        self.device_info = self._sensor_idn()
         self.connected = True
         logging.info(f"Connected to simulated power meter: {self.device_info}")
 
@@ -321,6 +456,8 @@ class SimulatedPowerMeter(PowerMeter):
     def read_power(self) -> float:
         if not self.connected:
             raise PowerMeterError("Not connected to power meter")
+        if not self.sensor_connected:
+            raise PowerMeterError("Failed to read power: timeout (simulated, no sensor)")
         # ±2% sinusoidal drift (30 s period) so the display visibly changes
         drift = 1.0 + 0.02 * math.sin(2.0 * math.pi * time.time() / 30.0)
         # 1% Gaussian noise, reduced by averaging like a real meter
@@ -426,6 +563,8 @@ class PowerMeterController:
         except Exception as e:
             c.responding = False
             c.error = f"{type(e).__name__}: {e}".strip()
+            if "RSRC_NFOUND" in c.error:
+                c.error = f"{RSRC_NFOUND_HINT} [VI_ERROR_RSRC_NFOUND]"
         finally:
             if inst is not None:
                 try:
@@ -553,6 +692,9 @@ class PowerMeterController:
         raw_ref, _, target = self.read_meters()
 
         if raw_ref is None or target is None:
+            faults = self.meter_faults()
+            if faults:
+                raise PowerMeterError(f"Cannot calibrate: {faults[0]}")
             raise PowerMeterError("Both meters must be connected to calibrate")
         if raw_ref <= 0:
             raise PowerMeterError("Reference power must be positive to calibrate")
@@ -563,9 +705,75 @@ class PowerMeterController:
         logging.info(f"Calibrated: factor = {factor:.6f} (target={target:.6e}, ref={raw_ref:.6e})")
         return factor
 
+    def _read_meter(self, pm: PowerMeter) -> Optional[float]:
+        """Read one meter, backing off while it is faulted.
+
+        A meter without its sensor head never answers MEAS:POW?, so every
+        read would wait out the VISA timeout while holding the meter. After
+        a failure the meter is marked faulted (pm.fault) and only a quick
+        sensor check runs every FAULT_RETRY_S until readings work again.
+        """
+        now = time.monotonic()
+        if pm.fault:
+            if now < pm.retry_at:
+                return None
+            if pm.check_sensor() is False:
+                pm.fault = NO_SENSOR_FAULT
+                pm.retry_at = time.monotonic() + FAULT_RETRY_S
+                return None
+        try:
+            value = pm.read_power()
+        except PowerMeterError as e:
+            first = not pm.fault
+            present = pm.check_sensor()
+            pm.fault = NO_SENSOR_FAULT if present is False else READ_FAULT
+            pm.retry_at = time.monotonic() + FAULT_RETRY_S
+            if first:
+                logging.warning(
+                    f"{pm.get_short_name()}: {pm.fault} ({e}; sensor: {pm.device_info!r})"
+                )
+            return None
+        if pm.fault:
+            logging.info(f"{pm.get_short_name()}: readings restored ({pm.device_info})")
+            pm.fault = ""
+            try:
+                # A (possibly different) head was plugged in: re-apply settings
+                pm.configure_default_settings()
+            except PowerMeterError as e:
+                logging.warning(f"{pm.get_short_name()}: could not re-apply settings: {e}")
+        return value
+
+    def applied_wavelength(self) -> Optional[int]:
+        """Wavelength the assigned meters are actually set to, or None.
+
+        This is what measurements are taken at - it may be an external
+        source rather than one of the box's lasers, and it can differ from
+        an unapplied value typed into the GUI. Target meter first.
+        """
+        for pm in (self.target_meter, self.reference_meter):
+            if pm is not None and pm.connected:
+                return pm.wavelength_nm
+        return None
+
+    def meter_identities(self) -> dict:
+        """{"reference"/"target": MeterIdentity} for the assigned meters"""
+        out = {}
+        if self.reference_meter is not None:
+            out["reference"] = self.reference_meter.identity()
+        if self.target_meter is not None:
+            out["target"] = self.target_meter.identity()
+        return out
+
+    def meter_faults(self) -> List[str]:
+        """Fault messages for connected meters that currently can't read."""
+        return [pm.fault for pm in self.power_meters if pm.fault]
+
     def read_meters(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         """
         Read power from both meters with calibration applied to reference.
+
+        A meter that can't read (e.g. sensor head unplugged) gives None and
+        is retried every FAULT_RETRY_S; see _read_meter() and PowerMeter.fault.
 
         Returns:
             Tuple of (raw_reference_power, corrected_reference_power, target_power) in Watts.
@@ -576,17 +784,12 @@ class PowerMeterController:
         target_power = None
 
         if self.reference_meter and self.reference_meter.connected:
-            try:
-                raw_ref = self.reference_meter.read_power()
+            raw_ref = self._read_meter(self.reference_meter)
+            if raw_ref is not None:
                 corrected_ref = raw_ref * self.calibration_factor
-            except PowerMeterError as e:
-                logging.error(f"Error reading reference meter: {str(e)}")
 
         if self.target_meter and self.target_meter.connected:
-            try:
-                target_power = self.target_meter.read_power()
-            except PowerMeterError as e:
-                logging.error(f"Error reading target meter: {str(e)}")
+            target_power = self._read_meter(self.target_meter)
 
         return raw_ref, corrected_ref, target_power
 

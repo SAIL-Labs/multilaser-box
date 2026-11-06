@@ -56,6 +56,7 @@ from multilaser.power_meter_controller import (
     format_power_auto_scale,
 )
 from multilaser.meter_registry import MeterRegistry
+from multilaser.meter_poller import MeterPoller
 from multilaser.measurement_logger import (
     MeasurementLogger,
     MeasurementLogError,
@@ -256,6 +257,15 @@ class PowerDisplay(QWidget):
         self.raw_label.setVisible(False)
         layout.addWidget(self.raw_label)
 
+        # Fault (e.g. sensor head unplugged) - hidden while readings work
+        self.fault_label = QLabel("")
+        self.fault_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        self.fault_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.fault_label.setWordWrap(True)
+        self.fault_label.setStyleSheet("color: #e74c3c;")
+        self.fault_label.setVisible(False)
+        layout.addWidget(self.fault_label)
+
         # Device info
         self.device_label = QLabel("Not connected")
         self.device_label.setFont(QFont("Arial", 8))
@@ -288,6 +298,19 @@ class PowerDisplay(QWidget):
     def set_device_info(self, info: str):
         """Set the device information text"""
         self.device_label.setText(info)
+
+    def set_fault(self, message: str):
+        """Show why this meter has no reading ("" clears it)"""
+        if message == self.fault_label.text():
+            return
+        self.fault_label.setText(message)
+        self.fault_label.setVisible(bool(message))
+        self.power_label.setStyleSheet(
+            self.power_label.styleSheet().replace(
+                "color: #00ff00;" if message else "color: #e74c3c;",
+                "color: #e74c3c;" if message else "color: #00ff00;",
+            )
+        )
 
 
 class PowerMeterTab(QWidget):
@@ -323,8 +346,12 @@ class PowerMeterTab(QWidget):
         # Guards against the row-click and spinner handlers re-triggering
         # each other (click selects row -> sets spinner -> would re-select)
         self._syncing_port_selection = False
-        self.update_timer = QTimer()
-        self.update_timer.timeout.connect(self.update_readings)
+        # Reads run on a worker thread (VISA queries block); results arrive
+        # via signal. QTimer-like interface: start/stop/isActive/setInterval.
+        self.update_timer = MeterPoller(self.controller.read_meters, self)
+        self.update_timer.readings.connect(self.update_readings)
+        self.update_timer.timing.connect(self._on_poll_timing)
+        self._slow_read_noted = False
 
         self.init_ui()
         self.load_settings()
@@ -834,14 +861,14 @@ class PowerMeterTab(QWidget):
     def _reload_measurement_table(self):
         """Rebuild the table from the current log file (empty if none).
 
-        For report logs the rows come from the sheet matching the current
-        wavelength setting.
+        Excel rows come from the sheet for the wavelength the meters are set
+        to (see _log_wavelength).
         """
         self.measurement_table.setRowCount(0)
         if self.measurement_log is not None:
             try:
                 for row in self.measurement_log.read_measurements(
-                    wavelength_nm=self.wavelength_spin.value()
+                    wavelength_nm=self._log_wavelength()
                 ):
                     trial, port, injection, output = row[:4]
                     raw_ref = row[4] if len(row) > 4 else None
@@ -1151,6 +1178,7 @@ class PowerMeterTab(QWidget):
             self._update_log_controls()
 
             # Start updating readings
+            self._slow_read_noted = False
             self.update_timer_rate()
             self.update_timer.start()
 
@@ -1205,6 +1233,8 @@ class PowerMeterTab(QWidget):
         self.target_display.update_power(None)
         self.ref_display.set_device_info("Not connected")
         self.target_display.set_device_info("Not connected")
+        self.ref_display.set_fault("")
+        self.target_display.set_fault("")
         self.ref_display.set_raw_info(None)
 
         self._last_corrected_ref = None
@@ -1296,6 +1326,7 @@ class PowerMeterTab(QWidget):
                 has_both = ref_index is not None and target_index is not None
                 self.calibrate_btn.setEnabled(has_both)
                 self.known_meters_changed.emit()
+                self._show_meter_faults()
 
             except PowerMeterError as e:
                 QMessageBox.critical(
@@ -1362,6 +1393,11 @@ class PowerMeterTab(QWidget):
                 self, "Settings Error", f"Failed to apply settings:\n{str(error)}"
             )
 
+        # Readings now belong to the new wavelength (its own log sheet)
+        self._clear_reading_history()
+        if self.measurement_log is not None:
+            self._reload_measurement_table()
+
     def update_timer_rate(self):
         """Update the timer interval based on the update rate"""
         rate_hz = self.update_rate_spin.value()
@@ -1403,6 +1439,8 @@ class PowerMeterTab(QWidget):
         self, ref: bool = True, target: bool = True, raw: bool = True
     ):
         """Drop buffered readings that no longer reflect the current setup"""
+        # A read already in flight also predates the change
+        self.update_timer.invalidate()
         if ref:
             self._ref_history.clear()
         if target:
@@ -1481,9 +1519,10 @@ class PowerMeterTab(QWidget):
         raw_ref, target = self.controller.last_calibration
         try:
             self.measurement_log.set_report_calibration(
-                wavelength_nm=self.wavelength_spin.value(),
+                wavelength_nm=self._log_wavelength(),
                 pmref_w=raw_ref,
                 launch_w=target,
+                meters=self.controller.meter_identities(),
             )
         except MeasurementLogError as e:
             QMessageBox.critical(
@@ -1497,10 +1536,42 @@ class PowerMeterTab(QWidget):
         )
         self._reload_measurement_table()
 
-    def update_readings(self):
-        """Update power readings from both meters"""
+    def _show_meter_faults(self):
+        """Show each assigned meter's fault (e.g. no sensor head) on its display."""
+        for display, pm in (
+            (self.ref_display, self.controller.reference_meter),
+            (self.target_display, self.controller.target_meter),
+        ):
+            fault = pm.fault if pm is not None else ""
+            if fault != display.fault_label.text():
+                display.set_fault(fault)
+                if pm is not None:
+                    # Sensor details change when a head is unplugged/swapped
+                    display.set_device_info(self._meter_info(pm))
+
+    def _on_poll_timing(self, elapsed_s: float, interval_s: float):
+        """Note once per connection when the meters can't keep up."""
+        if self._slow_read_noted or elapsed_s <= interval_s * 1.2:
+            return
+        if self.controller.meter_faults():
+            return  # slow because a read failed, not because the meters are slow
+        self._slow_read_noted = True
+        rate = 1.0 / elapsed_s
+        logging.getLogger(__name__).info(
+            f"Power meter reads take {elapsed_s * 1000:.0f} ms; "
+            f"updates limited to ~{rate:.1f} Hz"
+        )
+        self.status_label.setText(
+            f"{self.status_label.text()} - meters answer in "
+            f"{elapsed_s * 1000:.0f} ms, so updates run at ~{rate:.1f} Hz"
+        )
+
+    def update_readings(self, readings=None):
+        """Show a set of readings (from the poller; reads now if None)."""
         try:
-            raw_ref, corrected_ref, target_power = self.controller.read_meters()
+            if readings is None:
+                readings = self.controller.read_meters()
+            raw_ref, corrected_ref, target_power = readings
 
             # Remember latest readings for measurement logging
             # (frozen display holds these values since the timer is stopped)
@@ -1519,6 +1590,7 @@ class PowerMeterTab(QWidget):
             # Show corrected reference as main display
             self.ref_display.update_power(corrected_ref)
             self.target_display.update_power(target_power)
+            self._show_meter_faults()
 
             # Show raw reference when calibration is active
             if self.controller.calibration_factor != 1.0 and raw_ref is not None:
@@ -1648,7 +1720,7 @@ class PowerMeterTab(QWidget):
         try:
             log = MeasurementLogger(path, layout=layout)
             log.create_new(
-                wavelength_nm=self.wavelength_spin.value(),
+                wavelength_nm=self._log_wavelength(),
                 layout=layout,
                 serial=serial,
             )
@@ -1827,7 +1899,7 @@ class PowerMeterTab(QWidget):
 
         try:
             data = self.measurement_log.read_report_export(
-                wavelength_nm=self.wavelength_spin.value()
+                wavelength_nm=self._log_wavelength()
             )
         except MeasurementLogError as e:
             QMessageBox.critical(self, "Airtable Push Error", str(e))
@@ -1970,7 +2042,7 @@ class PowerMeterTab(QWidget):
             return
         try:
             existing = self.measurement_log.get_report_calibration(
-                self.wavelength_spin.value()
+                self._log_wavelength()
             )
         except MeasurementLogError:
             return
@@ -2018,6 +2090,9 @@ class PowerMeterTab(QWidget):
             self._cancel_log_collection("Measurement cancelled")
             return
 
+        if not self._confirm_log_wavelength():
+            return
+
         if not self._confirm_port_overwrite():
             return
 
@@ -2038,6 +2113,58 @@ class PowerMeterTab(QWidget):
             f"Measuring... 0/{self._log_collect_target} readings"
         )
 
+    def _log_wavelength(self) -> int:
+        """Wavelength measurements are logged at: what the meters are set to.
+
+        That is the meters' applied wavelength (possibly an external source,
+        not one of the box's lasers), falling back to the Wavelength box when
+        no meter is connected.
+        """
+        applied = self.controller.applied_wavelength()
+        return applied if applied is not None else self.wavelength_spin.value()
+
+    def _confirm_log_wavelength(self) -> bool:
+        """Catch a Wavelength box edit that was never applied to the meters.
+
+        Logging uses the meters' wavelength; if the box says otherwise the
+        user probably meant to change it. Returns False to cancel logging.
+        """
+        applied = self.controller.applied_wavelength()
+        typed = self.wavelength_spin.value()
+        if applied is None or applied == typed:
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Wavelength Not Applied")
+        box.setText(
+            f"The Wavelength box says {typed} nm, but the power meters are "
+            f"still set to {applied} nm."
+        )
+        apply_btn = None
+        if self.frozen:
+            box.setInformativeText(
+                f"The frozen readings were taken at {applied} nm. "
+                f"Log them at {applied} nm?"
+            )
+        else:
+            box.setInformativeText(
+                f"Apply {typed} nm first (fresh readings are then taken), or "
+                f"log at {applied} nm?"
+            )
+            apply_btn = box.addButton(
+                f"Apply {typed} nm and Log", QMessageBox.ButtonRole.AcceptRole
+            )
+        keep_btn = box.addButton(
+            f"Log at {applied} nm", QMessageBox.ButtonRole.AcceptRole
+        )
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if apply_btn is not None and clicked is apply_btn:
+            self.apply_settings()
+            return self.controller.applied_wavelength() == typed
+        return clicked is keep_btn
+
     def _confirm_port_overwrite(self) -> bool:
         """Warn before overwriting an already-logged report port.
 
@@ -2048,7 +2175,7 @@ class PowerMeterTab(QWidget):
         port = self.port_spin.value()
         try:
             exists = self.measurement_log.has_port_measurement(
-                port, wavelength_nm=self.wavelength_spin.value()
+                port, wavelength_nm=self._log_wavelength()
             )
         except MeasurementLogError:
             # Can't inspect the file (e.g. open in Excel); proceed and let
@@ -2137,12 +2264,14 @@ class PowerMeterTab(QWidget):
                 port=port,
                 injection_power_w=injection,
                 output_power_w=output,
-                wavelength_nm=self.wavelength_spin.value(),
+                wavelength_nm=self._log_wavelength(),
                 raw_reference_w=raw_reference,
+                meters=self.controller.meter_identities(),
             )
         except MeasurementLogError as e:
             QMessageBox.critical(self, "Logging Error", str(e))
             return
+        wavelength = self._log_wavelength()
 
         navg = max(len(self._ref_history), len(self._target_history))
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -2150,7 +2279,10 @@ class PowerMeterTab(QWidget):
             # Port-keyed layout: re-logging a port overwrites its row, so
             # rebuild the table from the file instead of appending
             self._reload_measurement_table()
-            status = f"Logged port {port} (avg of {navg} readings) at {timestamp}"
+            status = (
+                f"Logged port {port} at {wavelength} nm "
+                f"(avg of {navg} readings) at {timestamp}"
+            )
             # Advance to the next port so repeated logs walk down the rows
             # (spin back to re-log a port; its row is overwritten)
             if port < REPORT_MAX_PORTS:
@@ -2160,8 +2292,8 @@ class PowerMeterTab(QWidget):
         else:
             self._append_table_row(trial, port, injection, output)
             self.log_status_label.setText(
-                f"Logged trial {trial} (port {port}, avg of {navg} readings) "
-                f"at {timestamp}"
+                f"Logged trial {trial} (port {port}, {wavelength} nm, "
+                f"avg of {navg} readings) at {timestamp}"
             )
         self.settings.setValue("power_meter/log_port", self.port_spin.value())
 
@@ -2223,8 +2355,8 @@ class PowerMeterTab(QWidget):
                 )
 
     def _on_wavelength_changed(self):
-        """Reload the table when the wavelength selects a different report sheet"""
-        if self.measurement_log is not None and self.measurement_log.layout == "report":
+        """Reload the table when the wavelength selects a different sheet"""
+        if self.measurement_log is not None:
             self._reload_measurement_table()
 
     def connect_settings_signals(self):
